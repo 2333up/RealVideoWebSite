@@ -1,0 +1,82 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-slate-50 text-ink-900 antialiased;
+    /* 极淡的顶部暖光，避免纯白刺眼 */
+    background-image: radial-gradient(
+      120% 60% at 50% -10%,
+      rgba(251, 114, 153, 0.07) 0%,
+      rgba(251, 114, 153, 0) 60%
+    );
+    background-repeat: no-repeat;
+  }
+
+  ::selection {
+    @apply bg-bilibili/20;
+  }
+}
+
+@layer components {
+  /* 卡片通用容器 */
+  .surface {
+    @apply rounded-2xl border border-ink-100/80 bg-white shadow-card;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-xl px-4 py-2 text-sm
+           font-medium transition-all duration-200 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply btn bg-bilibili text-white hover:bg-bilibili-deep active:scale-[0.98];
+  }
+
+  .btn-ghost {
+    @apply btn border border-ink-100 bg-white text-ink-700 hover:border-ink-300 hover:bg-slate-50;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium;
+  }
+
+  /* 隐藏滚动条但保留滚动能力 */
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
+
+/* 细滚动条 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(17, 19, 24, 0.14);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(17, 19, 24, 0.28);
+  background-clip: content-box;
+}
