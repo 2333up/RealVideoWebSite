@@ -1,0 +1,18 @@
+# 仅用于工具配置（ruff），不参与打包；运行依赖仍在 requirements.txt
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["data", ".venv", "venv", "__pycache__"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = [
+  "E501",  # 行长由 ruff format 处理，中文注释/URL 易超长，不阻塞
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]      # 包内聚合导入属于正常用法
+"test_*.py" = ["E402"]        # 测试脚本允许先 sys.path 再导入
+
+[tool.ruff.format]
+quote-style = "double"
