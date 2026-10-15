@@ -158,6 +158,13 @@ export const api = {
         `&page=${page}&page_size=${pageSize}&sort=${sort}`,
     ),
 
+  /** 获取 B 站视频播放直链信息（分 P + 清晰度），供下载 */
+  fetchPlayurl: (bvid: string, cid?: number) =>
+    request<PlayurlInfo>(
+      `/platforms/bilibili/playurl?bvid=${encodeURIComponent(bvid)}` +
+        (cid ? `&cid=${cid}` : ''),
+    ),
+
   listAccounts: (platform?: string) =>
     request<{ accounts: AccountBrief[] }>(`/accounts${platform ? `?platform=${platform}` : ''}`),
 
@@ -207,6 +214,30 @@ export interface CommentPage {
   total: number
   has_more: boolean
   page: number
+}
+
+export interface PlayurlPage {
+  cid: number
+  page: number
+  part: string
+  duration: number
+}
+
+export interface PlayurlFormat {
+  quality: number
+  desc: string
+}
+
+export interface PlayurlInfo {
+  bvid: string
+  aid: string
+  title: string
+  pages: PlayurlPage[]
+  current_cid: number
+  quality: number
+  quality_desc: string
+  formats: PlayurlFormat[]
+  durl: { url: string; size: number; length: number }[]
 }
 
 /** 播放量之类的数字压缩为「1.2万」 */

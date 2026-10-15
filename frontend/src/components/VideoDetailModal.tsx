@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, formatCount, formatDuration, formatRelativeTime, type ContentCard } from '../api/client'
+import {
+  api,
+  formatCount,
+  formatDuration,
+  formatRelativeTime,
+  type ContentCard,
+  type PlayurlInfo,
+} from '../api/client'
 import CommentSection from './CommentSection'
 
 interface Props {
@@ -37,6 +44,18 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
 
   const isVideo = detail?.kind === 'video'
   const bvid = (detail?.extra?.bvid as string | undefined) ?? ''
+  // 小红书：图片列表（图文笔记）与视频源（视频笔记），均由后端 fetch_detail 返回
+  const xhsImages = (detail?.extra?.images as string[] | undefined) ?? []
+  const xhsVideo = (detail?.extra?.video as string | undefined) ?? ''
+  const isXhs = platform === 'xiaohongshu'
+  const isBili = platform === 'bilibili'
+
+  // 下载弹窗状态
+  const [showDownload, setShowDownload] = useState(false)
+  const [playurlInfo, setPlayurlInfo] = useState<PlayurlInfo | null>(null)
+  const [downloadLoading, setDownloadLoading] = useState(false)
+  const [downloadError, setDownloadError] = useState('')
+  const [downloadCid, setDownloadCid] = useState<number | undefined>(undefined)
 
   // 走服务端代理而非直接 iframe 站方页面：
   // 同源后注入的 CSS 才能生效（藏掉推荐区），且能带上库中保存的登录态。
@@ -55,10 +74,40 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
       setLoading(true)
       setError('')
       try {
-        const res = await api.fetchDetail(platform, uid)
-        if (!cancelled) setDetail(res.item)
+        // 小红书详情需要 xsec_token（搜索结果里携带），附加到 uid 传给后端
+        const xsecToken = (fallback?.extra?.xsec_token as string | undefined) ?? ''
+        const detailUid = platform === 'xiaohongshu' && xsecToken ? `${uid}|${xsecToken}` : uid
+        const res = await api.fetchDetail(platform, detailUid)
+        if (!cancelled) {
+          const fetched = res.item
+          // 详情数据与搜索结果 fallback 合并：详情页偶发拿不全（风控/加载慢），
+          // 缺失字段回退 fallback，避免「有数据但标题/图片空白」的倒退体验
+          const merged: ContentCard = {
+            ...fetched,
+            title: fetched.title || fallback?.title || '',
+            summary: fetched.summary || fallback?.summary || '',
+            cover_url: fetched.cover_url || fallback?.cover_url || '',
+            like_count: fetched.like_count || fallback?.like_count || 0,
+            comment_count: fetched.comment_count || fallback?.comment_count || 0,
+            favorite_count: fetched.favorite_count || fallback?.favorite_count || 0,
+            share_count: fetched.share_count || fallback?.share_count || 0,
+            published_at: fetched.published_at ?? fallback?.published_at ?? null,
+            author: fetched.author?.name ? fetched.author : (fallback?.author ?? fetched.author),
+            extra: { ...(fallback?.extra ?? {}), ...(fetched.extra ?? {}) },
+          }
+          setDetail(merged)
+        }
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : '详情加载失败')
+        // 小红书 / 抖音：详情接口可能被风控（小红书需 xsec、抖音详情未实现），
+        // 失败时静默降级，用 fallback 数据展示，避免弹错误遮住本来可看的内容。
+        if ((platform === 'xiaohongshu' || platform === 'douyin') && fallback) {
+          if (!cancelled) {
+            setDetail(fallback)
+            setError('')
+          }
+        } else {
+          if (!cancelled) setError(err instanceof Error ? err.message : '详情加载失败')
+        }
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -67,6 +116,7 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
     return () => {
       cancelled = true
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [platform, uid])
 
   // ESC 关闭 + 打开时锁定背景滚动
@@ -107,6 +157,48 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
     }
   }
 
+  // 打开下载弹窗：拉取播放直链信息（分 P + 清晰度）
+  const openDownload = async () => {
+    if (!bvid) return
+    setShowDownload(true)
+    setDownloadLoading(true)
+    setDownloadError('')
+    setPlayurlInfo(null)
+    try {
+      const info = await api.fetchPlayurl(bvid)
+      setPlayurlInfo(info)
+      setDownloadCid(info.current_cid)
+    } catch (err) {
+      setDownloadError(err instanceof Error ? err.message : '获取下载信息失败')
+    } finally {
+      setDownloadLoading(false)
+    }
+  }
+
+  // 切换分 P：重新拉取该 cid 的播放地址
+  const switchCid = async (cid: number) => {
+    if (!bvid) return
+    setDownloadCid(cid)
+    setDownloadLoading(true)
+    setDownloadError('')
+    try {
+      const info = await api.fetchPlayurl(bvid, cid)
+      setPlayurlInfo(info)
+    } catch (err) {
+      setDownloadError(err instanceof Error ? err.message : '获取下载信息失败')
+    } finally {
+      setDownloadLoading(false)
+    }
+  }
+
+  // 触发下载：走后端代理（直链有防盗链，前端直下会 403）
+  const doDownload = () => {
+    if (!bvid) return
+    const url = `/api/platforms/bilibili/download?bvid=${encodeURIComponent(bvid)}` +
+      (downloadCid ? `&cid=${downloadCid}` : '')
+    window.location.href = url
+  }
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
@@ -132,6 +224,18 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
           </div>
 
           <div className="flex shrink-0 items-center gap-2">
+            {/* B 站视频下载入口 */}
+            {isBili && isVideo && bvid ? (
+              <button
+                type="button"
+                onClick={openDownload}
+                className="shrink-0 rounded-lg border border-ink-100 bg-white px-2.5 py-0.5
+                           text-[11px] font-medium text-ink-700 transition-colors hover:border-bilibili hover:text-bilibili"
+              >
+                ⬇ 下载
+              </button>
+            ) : null}
+
             {/* 站方页自带评论区，与自绘内容重复，故提供两种视图供选择 */}
             {isVideo && embedSrc ? (
               <div className="flex rounded-lg bg-slate-100 p-0.5">
@@ -263,7 +367,74 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
                 </div>
               ) : detail ? (
                 <>
-                  <h2 className="text-base font-bold leading-snug text-ink-900">{detail.title}</h2>
+                  <h2 className="text-base font-bold leading-snug text-ink-900">
+                    {detail.title || (platform === 'douyin' ? '抖音视频' : '')}
+                  </h2>
+
+                  {/* ---- 抖音：详情接口未实现，展示封面 + 站内打开引导 ---- */}
+                  {platform === 'douyin' && detail.cover_url ? (
+                    <div className="mt-4">
+                      <img
+                        src={detail.cover_url}
+                        alt={detail.title || '抖音视频封面'}
+                        referrerPolicy="no-referrer"
+                        className="w-full max-w-md rounded-xl object-contain"
+                        onError={(e) => {
+                          ;(e.target as HTMLImageElement).style.display = 'none'
+                        }}
+                      />
+                      <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-700">
+                        ⚠ 抖音详情接口受 a_bogus 签名保护，暂无法在站内直接播放。
+                        点击右上角「在抖音打开（含登录态）」可跳转原页面观看完整视频。
+                      </p>
+                    </div>
+                  ) : null}
+
+                  {/* ---- 小红书：图文笔记的图片列表 / 视频笔记的播放器 ---- */}
+                  {isXhs && !isVideo && xhsImages.length > 0 ? (
+                    <div className="mt-4 grid grid-cols-1 gap-3">
+                      {xhsImages.map((src, i) => (
+                        <img
+                          key={i}
+                          src={src}
+                          alt={`${detail.title} 图${i + 1}`}
+                          referrerPolicy="no-referrer"
+                          loading="lazy"
+                          className="w-full rounded-xl object-contain"
+                          onError={(e) => {
+                            ;(e.target as HTMLImageElement).style.display = 'none'
+                          }}
+                        />
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {isXhs && isVideo && xhsVideo ? (
+                    <div className="mt-4 overflow-hidden rounded-xl bg-black">
+                      <video
+                        src={xhsVideo}
+                        controls
+                        playsInline
+                        preload="metadata"
+                        className="aspect-video w-full"
+                      />
+                    </div>
+                  ) : null}
+
+                  {isXhs && isVideo && !xhsVideo && detail.cover_url ? (
+                    <div className="mt-4">
+                      <img
+                        src={detail.cover_url}
+                        alt={detail.title}
+                        referrerPolicy="no-referrer"
+                        className="w-full max-w-md rounded-xl object-contain"
+                      />
+                      <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-700">
+                        ⚠ 该视频笔记的播放源被小红书风控拦截（详情页需通过官方验证码校验），
+                        无法在站内直接播放。点开正文可看简介与互动数据，观看请前往原页面。
+                      </p>
+                    </div>
+                  ) : null}
 
                   {/* UP 主 */}
                   <div className="mt-3 flex items-center gap-2.5">
@@ -302,12 +473,30 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
 
                   {/* 数据指标 */}
                   <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 rounded-xl bg-slate-50 px-4 py-3">
-                    <Metric label="播放" value={formatCount(detail.view_count)} />
-                    {isVideo ? <Metric label="弹幕" value={formatCount(detail.danmaku_count)} /> : null}
-                    <Metric label="点赞" value={formatCount(detail.like_count)} />
-                    <Metric label="投币" value={formatCount(detail.coin_count)} />
-                    <Metric label="收藏" value={formatCount(detail.favorite_count)} />
-                    <Metric label="评论" value={formatCount(detail.comment_count)} />
+                    {isXhs ? (
+                      <>
+                        <Metric label="点赞" value={formatCount(detail.like_count)} />
+                        <Metric label="收藏" value={formatCount(detail.favorite_count)} />
+                        <Metric label="评论" value={formatCount(detail.comment_count)} />
+                        <Metric label="分享" value={formatCount(detail.share_count)} />
+                      </>
+                    ) : platform === 'douyin' ? (
+                      <>
+                        <Metric label="点赞" value={formatCount(detail.like_count)} />
+                        <Metric label="评论" value={formatCount(detail.comment_count)} />
+                        <Metric label="收藏" value={formatCount(detail.favorite_count)} />
+                        <Metric label="分享" value={formatCount(detail.share_count)} />
+                      </>
+                    ) : (
+                      <>
+                        <Metric label="播放" value={formatCount(detail.view_count)} />
+                        {isVideo ? <Metric label="弹幕" value={formatCount(detail.danmaku_count)} /> : null}
+                        <Metric label="点赞" value={formatCount(detail.like_count)} />
+                        <Metric label="投币" value={formatCount(detail.coin_count)} />
+                        <Metric label="收藏" value={formatCount(detail.favorite_count)} />
+                        <Metric label="评论" value={formatCount(detail.comment_count)} />
+                      </>
+                    )}
                   </div>
 
                   {/* 简介 */}
@@ -340,18 +529,106 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
                       className="btn-primary mt-5 w-full !text-xs"
                       style={{ backgroundColor: accentColor }}
                     >
-                      在{platform === 'bilibili' ? '哔哩哔哩' : '平台'}打开（含登录态）↗
+                      在{platform === 'bilibili' ? '哔哩哔哩' : platform === 'douyin' ? '抖音' : '平台'}打开（含登录态）↗
                     </a>
                   ) : null}
 
-                  {/* 评论区：同样取结构化数据自绘，不夹带平台推荐 */}
-                  <CommentSection platform={platform} uid={uid} />
+                  {/* 评论区：同样取结构化数据自绘，不夹带平台推荐。小红书/抖音评论尚未接入，先禁用 */}
+                  <CommentSection platform={platform} uid={uid} enabled={!isXhs && platform !== 'douyin'} />
                 </>
               ) : null}
             </div>
           </>
         )}
       </div>
+
+      {/* ---- 下载弹窗 ---- */}
+      {showDownload ? (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50"
+          onClick={() => setShowDownload(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-ink-900">下载视频</h3>
+              <button
+                type="button"
+                onClick={() => setShowDownload(false)}
+                className="rounded-lg p-1 text-ink-300 hover:bg-slate-100 hover:text-ink-700"
+                aria-label="关闭"
+              >
+                ✕
+              </button>
+            </div>
+
+            {downloadLoading ? (
+              <div className="flex items-center gap-2 py-8 text-sm text-ink-500">
+                <span className="h-4 w-4 animate-spin rounded-full border-2 border-ink-200 border-t-ink-700" />
+                正在获取播放地址…
+              </div>
+            ) : downloadError ? (
+              <div className="py-4 text-center">
+                <p className="text-xs leading-relaxed text-amber-700">{downloadError}</p>
+              </div>
+            ) : playurlInfo ? (
+              <div className="space-y-4">
+                {/* 分 P 选择（多 P 视频才显示） */}
+                {playurlInfo.pages.length > 1 ? (
+                  <div>
+                    <p className="mb-1.5 text-[11px] font-medium text-ink-500">选择分 P</p>
+                    <div className="flex max-h-32 flex-wrap gap-1.5 overflow-y-auto">
+                      {playurlInfo.pages.map((p) => (
+                        <button
+                          key={p.cid}
+                          type="button"
+                          onClick={() => void switchCid(p.cid)}
+                          className={`rounded-lg px-2.5 py-1 text-[11px] transition-colors ${
+                            downloadCid === p.cid
+                              ? 'bg-bilibili text-white'
+                              : 'bg-slate-100 text-ink-600 hover:bg-slate-200'
+                          }`}
+                        >
+                          {p.part || `P${p.page}`}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                {/* 清晰度信息 */}
+                <div className="rounded-xl bg-slate-50 px-3 py-2.5 text-[11px] leading-relaxed text-ink-600">
+                  <p>
+                    当前可下载清晰度：
+                    <span className="font-semibold text-ink-900">
+                      {playurlInfo.quality_desc || `${playurlInfo.quality}P`}
+                    </span>
+                  </p>
+                  <p className="mt-1 text-ink-400">
+                    {playurlInfo.formats.length > 0
+                      ? `支持：${playurlInfo.formats.map((f) => f.desc).join(' / ')}`
+                      : ''}
+                  </p>
+                  <p className="mt-1 text-amber-600">
+                    ⚠ 清晰度上限取决于登录态（游客 480P，登录 1080P，大会员更高）。
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={doDownload}
+                  className="btn-primary w-full !text-xs"
+                  style={{ backgroundColor: accentColor }}
+                >
+                  开始下载（{playurlInfo.title || bvid}）
+                </button>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }

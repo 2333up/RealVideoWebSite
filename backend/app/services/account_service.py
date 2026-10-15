@@ -64,15 +64,18 @@ async def save_manual_credential(
     if not ok:
         return None, note
 
-    # 平台 UID：优先取登录态字段，缺失时退化为 Cookie 指纹，
-    # 以保证同一份 Cookie 重复注入时更新同一条记录而非新增。
-    uid = (
-        cookie_map.get("uid_tt")
-        or cookie_map.get("sessionid_ss")
-        or cookie_map.get("sessionid")
-        or cookie_map.get("sid_tt")
-        or ""
-    )
+    # 平台 UID：优先由平台适配器从 Cookie 提取稳定标识（可覆盖），
+    # 缺失时回落到「已知登录字段 → cookie 指纹 md5」，以保证同一份 Cookie
+    # 重复注入时更新同一条记录而非新增。
+    uid = adapter.extract_credential_uid(cookie_map)
+    if not uid:
+        uid = (
+            cookie_map.get("uid_tt")
+            or cookie_map.get("sessionid_ss")
+            or cookie_map.get("sessionid")
+            or cookie_map.get("sid_tt")
+            or ""
+        )
     if not uid:
         import hashlib
 

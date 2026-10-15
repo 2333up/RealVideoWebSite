@@ -61,6 +61,190 @@ _HEADERS = {
     "Origin": "https://www.douyin.com",
 }
 
+# 剥离全部 <script>（含内联与外链，DOTALL 跨行匹配）。
+# 静态快照模式的核心：抖音 SPA 从我们的源启动会因 Referer/Origin 校验失败，
+# 接管失败可能清空 SSR 已渲染的结果卡片；剥离后卡片原样保留，交互由注入的
+# 点击拦截接管。
+_SCRIPT_RE = re.compile(r"<script\b[^>]*>.*?</script>", re.DOTALL | re.IGNORECASE)
+_SCRIPT_OPEN_RE = re.compile(r"<script\b[^>]*/>", re.IGNORECASE)
+
+# 整页嵌入（静态快照模式）注入的净化脚本。
+# 抖音搜索页结构：顶部导航 + 筛选栏 + 结果流（视频卡片）。需隐藏：
+#   顶部导航 / 侧边推荐 / 登录弹层 / 悬浮提示，让结果流铺满。
+# 由于 script 已剥离、页面是静态的，无需 MutationObserver 持续清扫（但图片
+# 懒加载仍需观察器兜底 no-referrer）。
+_DOUYIN_EMBED_CLEANUP = r"""
+<style id="lingoseek-douyin-cleanup">
+  /* 干扰区：登录墙、悬浮按钮、推荐侧栏等。
+     ⚠ 勿用 [class*="header"] 这类宽泛匹配——实测 #search-body-container
+     的类名是 "header-ui search-horizontal-new-layout"，它同时是搜索结果的
+     顶层容器，匹配它会连结果一起隐藏成整页白屏（重大教训）。 */
+  [class*="side-bar"], [class*="sidebar"], aside,
+  [class*="login-modal"], [class*="LoginModal"], [class*="guide"],
+  [class*="backtop"], [class*="back-top"],
+  [class*="LeftPanelHeader"], [class*="leftPanel"],
+  [class*="recommend"], [class*="related"],
+  #a11y-open-btn
+  { display: none !important; }
+
+  /* ===== 核心：恢复瀑布流布局（静态快照的关键） =====
+     抖音搜索结果的瀑布流是 JS 虚拟化布局：卡片 position:absolute +
+     transform 定位，容器高度由 JS 计算；上层还是 flex 布局、结果列宽度
+     也由 JS 分配。剥离 script 后容器高度塌 0、结果列宽塌 0 → 整页白屏
+     （实测教训）。解法：上层 flex 改 block 让宽度自然撑开，卡片改回
+     静态流式布局让高度自然撑开。 */
+  #search-content-area,
+  #search-content-area > div,
+  #search-content-area > div > div
+  { display: block !important; width: 100% !important; height: auto !important; }
+
+  #waterFallScrollContainer,
+  #search-result-container
+  { height: auto !important; max-height: none !important; overflow: visible !important; }
+
+  #waterFallScrollContainer [id^="waterfall_item_"] {
+    position: static !important;
+    transform: none !important;
+    display: inline-block !important;
+    vertical-align: top;
+    margin: 10px !important;
+    width: 224px !important;
+    height: auto !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+  }
+  /* 「相关搜索」等非视频瀑布流项：与视频卡片同为 waterfall_item 但没有封面图，
+     用 :has(img) 区分隐藏（顺带滤掉广告位） */
+  #waterFallScrollContainer [id^="waterfall_item_"]:not(:has(img))
+  { display: none !important; }
+  /* 兜底：任何残余的防闪烁隐藏全部恢复可见 */
+  #search-content-area, #search-content-area * {
+    visibility: visible !important;
+  }
+  body { overflow-y: auto !important; background: #fff !important; color: #161823 !important; }
+</style>
+<script id="lingoseek-douyin-capture">
+/* 修复图片/封面防盗链：抖音 CDN 校验 Referer，127.0.0.1 会被 403。
+   给所有图片设 referrerPolicy=no-referrer 并强制重新加载失败的图。 */
+(function () {
+  function fixImgs() {
+    document.querySelectorAll('img').forEach(function (im) {
+      if (!im.getAttribute('referrerpolicy')) {
+        im.setAttribute('referrerpolicy', 'no-referrer');
+      }
+      if (im.complete && im.naturalWidth === 0 && im.src) {
+        var s = im.src; im.src = ''; im.src = s;
+      }
+    });
+  }
+  fixImgs();
+  var mo = new MutationObserver(fixImgs);
+  mo.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
+  document.addEventListener('error', function (e) {
+    var t = e.target;
+    if (t && t.tagName === 'IMG' && !t.getAttribute('referrerpolicy')) {
+      t.setAttribute('referrerpolicy', 'no-referrer');
+      var s = t.src; t.src = ''; t.src = s;
+    }
+  }, true);
+})();
+
+/* 文本定位干扰区：抖音的类名是构建哈希（每次发版都变），CSS 选择器不稳，
+   按元素内容定位。用于隐藏左侧平台导航与「下载抖音」浮窗。
+   ⚠ 本脚本注入在 <head>，执行时 body 还没解析，必须等 DOMContentLoaded
+   再查 DOM（实测教训：同步执行时 querySelectorAll 全空，清理静默失效）。 */
+(function () {
+  function hideByText(txt, maxW) {
+    document.querySelectorAll('div').forEach(function (d) {
+      if (!d.innerText) return;
+      var text = d.innerText.replace(/\s/g, '');
+      if (text.indexOf(txt) < 0 || text.length > 400) return;
+      var t = d;
+      while (t.parentElement && t.parentElement !== document.body
+             && t.parentElement.getBoundingClientRect().width < maxW) {
+        t = t.parentElement;
+      }
+      var r = t.getBoundingClientRect();
+      if (r.width > 0 && r.width < maxW + 60) {
+        t.style.setProperty('display', 'none', 'important');
+      }
+    });
+  }
+  function cleanClutter() {
+    try {
+      // 左侧平台导航（精选/AI抖音/关注/朋友/我的/直播/放映厅/短剧/小游戏）
+      document.querySelectorAll('div').forEach(function (d) {
+        if (!d.innerText) return;
+        var text = d.innerText.replace(/\s/g, '');
+        if (text.indexOf('精选') === 0 && text.indexOf('AI抖音') >= 0
+            && text.indexOf('小游戏') >= 0 && text.length < 120) {
+          var t = d;
+          while (t.parentElement && t.parentElement !== document.body
+                 && t.parentElement.getBoundingClientRect().width < 260) {
+            t = t.parentElement;
+          }
+          t.style.setProperty('display', 'none', 'important');
+        }
+      });
+      // 「下载抖音精选」推广浮窗与底部备案栏
+      hideByText('下载抖音精选', 300);
+      hideByText('京ICP备', 300);
+    } catch (e) { /* 清理失败不影响主内容展示 */ }
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', cleanClutter);
+  } else {
+    cleanClutter();
+  }
+})();
+
+/* 静态快照没有 SPA 路由：拦截视频卡片点击，通过 postMessage 通知父页面。
+   抖音搜索结果卡片不是 <a href>，而是 div#waterfall_item_{aweme_id}（SPA 用
+   JS 事件绑定跳转，剥离 script 后无法跳转）。因此从被点击元素向上找最近的
+   [id^="waterfall_item_"] 祖先，提取其中的 aweme_id 与封面图。
+   抖音详情接口同样受 a_bogus 风控，父页面拿到 aweme_id 后可弹详情浮层
+   （当前 fetch_detail 未实现，降级为展示封面 + 站内打开原页）。 */
+document.addEventListener('click', function (e) {
+  var node = e.target;
+  while (node && node !== document.body) {
+    // 直接点击 <a>（若存在）且带 /video/ 链接
+    if (node.tagName === 'A' && node.getAttribute('href')) {
+      var href = node.getAttribute('href') || '';
+      var m = href.match(/\/video\/(\d+)/);
+      if (m) {
+        e.preventDefault();
+        e.stopPropagation();
+        var coverA = '';
+        var imgA = node.querySelector('img') || node.parentElement.querySelector('img');
+        if (imgA) coverA = imgA.src || imgA.getAttribute('data-src') || '';
+        window.parent.postMessage({
+          type: 'lingoseek-douyin-open', awemeId: m[1], href: href, cover: coverA
+        }, '*');
+      }
+      return;
+    }
+    // 抖音卡片：div#waterfall_item_{aweme_id}
+    if (node.id && node.id.indexOf('waterfall_item_') === 0) {
+      var awemeId = node.id.replace('waterfall_item_', '');
+      e.preventDefault();
+      e.stopPropagation();
+      var cover = '';
+      var img = node.querySelector('img');
+      if (img) cover = img.src || img.getAttribute('data-src') || '';
+      window.parent.postMessage({
+        type: 'lingoseek-douyin-open',
+        awemeId: awemeId,
+        href: '/video/' + awemeId,
+        cover: cover
+      }, '*');
+      return;
+    }
+    node = node.parentNode;
+  }
+}, true);
+</script>
+"""
+
 
 class DouyinError(RuntimeError):
     def __init__(self, code: int, message: str) -> None:
@@ -320,6 +504,54 @@ class DouyinAdapter(PlatformAdapter):
         """抖音单条详情同样受风控保护，当前不可用。"""
         logger.warning("抖音详情接口需要 a_bogus 签名，当前未实现（aweme_id=%s）", uid)
         return None
+
+    # ------------------------------------------------------------ 整页嵌入
+    async def fetch_embed_html(
+        self, keyword: str, credentials: dict[str, Any] | None = None
+    ) -> str:
+        """抓取抖音搜索页渲染后的 HTML，做成「静态快照」供 iframe 嵌入。
+
+        与小红书同源方案：抖音 SPA 从我们的源（127.0.0.1:8000）启动时，页面
+        JS 调抖音接口会因 Referer/Origin 校验失败，且缺少 a_bogus，接管失败可能
+        清空 SSR 结果。因此做成静态快照：
+
+          1. 保留 SSR 直出的搜索结果卡片（封面/标题/作者/点赞完整）
+          2. 剥离全部 <script>，不让抖音 JS 接管
+          3. 注入 <base> 与净化样式：隐藏顶部导航/侧栏/登录弹层，结果铺满
+          4. 注入图片防盗链修复（no-referrer）与点击拦截（postMessage 通知父页面）
+        """
+        browser = await self._ensure_browser_search()
+        html = await browser.fetch_search_html(keyword, credentials)
+        if not html:
+            return ""
+
+        # 0. 去掉暗色主题标记：抖音 SSR 按 dark 模式输出（白字黑底样式），
+        #    静态快照强制白底后会出现「白字白底」。去掉 dark 属性让浅色规则生效。
+        html = html.replace('dark="true"', "", 1)
+
+        # 1. 剥离所有 script（含内联与外链），阻止 SPA 接管导致白屏
+        html = _SCRIPT_RE.sub("", html)
+        html = _SCRIPT_OPEN_RE.sub("", html)
+
+        # 2. 注入 <base> 让相对路径资源（CSS/图片）正确解析到抖音主站。
+        #    注意必须替换完整的 '<head>'（含闭合括号）——只替换 '<head' 会把
+        #    原标签的 '>' 残留成可见文本（实测教训：左上角出现孤立的 '>'）。
+        base_tag = '<base href="https://www.douyin.com/">'
+        if "<head>" in html:
+            html = html.replace("<head>", "<head>" + base_tag, 1)
+        elif "<head" in html:
+            html = html.replace("<head", "<head>" + base_tag, 1)
+        else:
+            html = base_tag + html
+
+        # 3. 注入净化样式与点击拦截
+        cleanup = _DOUYIN_EMBED_CLEANUP
+        if "</head>" in html:
+            html = html.replace("</head>", cleanup + "</head>", 1)
+        else:
+            html += cleanup
+
+        return html
 
     # ------------------------------------------------------------ 登录
     async def start_login(self) -> LoginTicket:

@@ -71,8 +71,39 @@ class DouyinBrowserSearch:
         self._available = True  # 是否还有尝试价值（首次失败后置 False 避免反复重试）
 
     # ------------------------------------------------------------------ 生命周期
-    async def _ensure_browser(self, credentials: dict[str, Any] | None) -> None:
-        """惰性启动浏览器并注入登录 Cookie。"""
+    async def _ensure_browser(
+        self, credentials: dict[str, Any] | None, force_rebuild: bool = False
+    ) -> None:
+        """惰性启动浏览器并注入登录 Cookie。
+
+        force_rebuild=True 时强制重建 context（丢弃旧 context 重新注入 Cookie）。
+        用于应对抖音对同一浏览器指纹反复搜索后的静默风控/登录弹窗——旧 context
+        的登录态可能已失效，重建能拿到全新指纹与新鲜会话（与小红书同款机制）。
+        """
+        if force_rebuild:
+            if self._context is not None:
+                try:
+                    await self._context.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._context = None
+        # 浏览器可能被外部 kill（内存压力等），仅判断非 None 不够，需检查 is_connected
+        browser_alive = False
+        if self._browser is not None:
+            try:
+                browser_alive = self._browser.is_connected()
+            except Exception:  # noqa: BLE001 - 老版本 playwright 无此方法
+                browser_alive = True
+        if not browser_alive:
+            self._browser = None
+            self._context = None
+            if self._pw is not None:
+                try:
+                    await self._pw.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._pw = None
+
         if self._browser is not None and self._context is not None:
             return
 
@@ -143,6 +174,62 @@ class DouyinBrowserSearch:
                 name, value = part.split("=", 1)
                 cookie_map[name.strip()] = value.strip()
         return cookie_map
+
+    # ------------------------------------------------------------------ 页面弹窗处理
+    async def _dismiss_login_dialog(self, page: Any) -> bool:
+        """检测并关闭抖音登录弹窗（请输入手机号 / 扫码登录）。
+
+        登录弹窗会以遮罩形式盖住搜索框，导致后续输入交互失败
+        （实测：wait_for input 超时的常见元凶）。检测到即尝试点击
+        关闭按钮，成功返回 True。风控弹窗（验证码）不在此处理。
+        """
+        try:
+            body_text = await page.evaluate("document.body ? document.body.innerText : ''")
+        except Exception:  # noqa: BLE001
+            return False
+        if not ("请输入手机号" in body_text or "扫码登录" in body_text or "验证码登录" in body_text):
+            return False
+        # 常见关闭形态：右上角 X（aria-label 关闭 / class 含 close）
+        for selector in ('[aria-label="关闭"]', '[class*="close"] button', 'button[class*="close"]'):
+            try:
+                btn = page.locator(selector).first
+                if await btn.is_visible():
+                    await btn.click(timeout=2000)
+                    await asyncio.sleep(1)
+                    logger.info("已关闭抖音登录弹窗（%s）", selector)
+                    return True
+            except Exception:  # noqa: BLE001 - 换下一个选择器继续
+                continue
+        # 兜底：Escape 键
+        try:
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(1)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _wait_search_box(self, page: Any, timeout_ms: int = 10000) -> None:
+        """等待搜索框可见；超时前先尝试关闭登录弹窗再等一轮。
+
+        抛 BrowserSearchError 时带明确指引，不再抛裸超时。
+        """
+        loc = page.locator('input[placeholder*="搜索"]').first
+        try:
+            await loc.wait_for(state="visible", timeout=timeout_ms)
+            return
+        except Exception:  # noqa: BLE001
+            pass
+        # 第一轮超时：很可能被登录弹窗遮挡，尝试关闭后再等一轮
+        if await self._dismiss_login_dialog(page):
+            try:
+                await loc.wait_for(state="visible", timeout=timeout_ms)
+                return
+            except Exception:  # noqa: BLE001
+                pass
+        raise BrowserSearchError(
+            "抖音搜索页未出现可交互的搜索框。可能原因：登录弹窗未关闭、"
+            "会话被风控要求验证、或页面加载异常。建议重新注入有效 Cookie 后重试"
+        )
 
     # ------------------------------------------------------------------ 搜索
     async def search(
@@ -238,9 +325,10 @@ class DouyinBrowserSearch:
 
             # 关键：必须在搜索框里输入关键词并回车，搜索接口才会发出。
             # 仅 goto 带关键词的 URL 并不会自动触发 single 接口。
-            # 点击超时缩短为 5 秒（有验证码时会快速失败，避免长时间挂起）。
+            # 等待前先处理可能出现的登录弹窗（遮罩会导致可见性判定失败）。
+            await self._dismiss_login_dialog(page)
+            await self._wait_search_box(page)
             loc = page.locator('input[placeholder*="搜索"]').first
-            await loc.wait_for(state="visible", timeout=10000)
             await loc.click(timeout=5000)
             await asyncio.sleep(1)
             await loc.fill(keyword)
@@ -275,6 +363,100 @@ class DouyinBrowserSearch:
         if not captured:
             return []
         return self._parse(captured, min(max_items, _HARD_LIMIT))
+
+    # ------------------------------------------------------------------ 搜索页整页抓取
+    async def fetch_search_html(
+        self,
+        keyword: str,
+        credentials: dict[str, Any] | None = None,
+    ) -> str:
+        """在真实浏览器里打开抖音搜索页，返回渲染后的完整 HTML。
+
+        供「整页嵌入」方案使用：把抖音官方搜索页原样搬到 iframe 里，
+        让用户直接看到平台原生搜索结果，点击视频由抖音自己的页面渲染详情，
+        从而绕开「自建详情被 a_bogus 风控」的问题。
+
+        与小红书的关键差异：抖音搜索页关键词在 URL path（/search/{keyword}），
+        且仅 goto 不会自动发起搜索，必须在搜索框输入关键词 + 回车。
+
+        :return: 渲染后的 HTML 字符串；失败返回空串
+        """
+        if not self._available:
+            raise BrowserSearchError("抖音浏览器搜索此前已失败，为避免反复重试已停用")
+
+        async with self._lock:
+            # 抖音对常驻指纹有静默风控：第一次失败后重建 context 换新指纹再试一次
+            # （验证码错误不重试——重试无益，直接抛出让用户知晓）。
+            last_error: Exception | None = None
+            for attempt in range(2):
+                try:
+                    return await self._fetch_search_html_locked(keyword, credentials)
+                except BrowserSearchError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+                    logger.warning(
+                        "抖音搜索页抓取第 %s 次失败（keyword=%s）: %s", attempt + 1, keyword, exc
+                    )
+                    if attempt == 0:
+                        logger.info("重建浏览器 context 以应对风控（keyword=%s）", keyword)
+                        await self._ensure_browser(credentials, force_rebuild=True)
+                        await asyncio.sleep(_RETRY_DELAY)
+            logger.exception("抖音搜索页抓取异常: %s", last_error)
+            raise BrowserSearchError(f"抖音搜索页抓取异常: {last_error}") from last_error
+
+    async def _fetch_search_html_locked(
+        self,
+        keyword: str,
+        credentials: dict[str, Any] | None,
+    ) -> str:
+        await self._ensure_browser(credentials)
+
+        page = await self._context.new_page()
+        try:
+            url = _SEARCH_HOME + urllib.parse.quote(keyword)
+            await page.goto(url, wait_until="load", timeout=40000)
+            await asyncio.sleep(6)
+
+            # 交互前先探测验证码遮罩；命中则快速失败
+            try:
+                captcha_visible = await page.locator("#captcha_container").is_visible()
+            except Exception:  # noqa: BLE001
+                captcha_visible = False
+            if captcha_visible:
+                raise BrowserSearchError(
+                    f"抖音对关键词「{keyword}」触发了滑块验证码，"
+                    "当前无法自动通过，请稍后或更换关键词重试"
+                )
+
+            # 关键：必须在搜索框里输入关键词并回车，搜索接口才会发出。
+            # 仅 goto 带关键词的 URL 并不会自动触发搜索。
+            # 等待前先处理可能出现的登录弹窗（遮罩会导致可见性判定失败）。
+            await self._dismiss_login_dialog(page)
+            await self._wait_search_box(page)
+            loc = page.locator('input[placeholder*="搜索"]').first
+            await loc.click(timeout=5000)
+            await asyncio.sleep(1)
+            await loc.fill(keyword)
+            await asyncio.sleep(1.5)
+            await loc.press("Enter")
+
+            # 等待结果渲染出来。抖音搜索结果卡片是 div#waterfall_item_{aweme_id}
+            # （SSR 直出，非 <a href>），等待其出现即说明搜索有结果。
+            try:
+                await page.wait_for_selector(
+                    '[id^="waterfall_item_"]', timeout=_RESPONSE_TIMEOUT * 1000
+                )
+            except Exception:  # noqa: BLE001 - 无结果/风控时卡片不出现
+                logger.info("抖音搜索页未出现结果卡片（keyword=%s）", keyword)
+
+            # 给结果稳定一点时间
+            await asyncio.sleep(3)
+
+            html = await page.content()
+            return html
+        finally:
+            await page.close()
 
     # ------------------------------------------------------------------ 解析
     def _parse(self, captured: list[dict[str, Any]], max_items: int) -> list[ContentItem]:

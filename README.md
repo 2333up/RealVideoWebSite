@@ -128,11 +128,17 @@ RealVideoWebSite/
 │   │   ├── models/account.py        # 平台账号 ORM（跨平台通用表）
 │   │   ├── platforms/
 │   │   │   ├── base.py              # ★ 平台抽象契约 ContentItem / PlatformAdapter
-│   │   │   └── bilibili/
-│   │   │       ├── client.py        # HTTP 客户端 · Cookie · 指纹 · 重试
-│   │   │       ├── wbi.py           # WBI 签名算法
-│   │   │       ├── login.py         # 扫码登录全流程
-│   │   │       └── adapter.py       # 视频/图文检索与结构归一化
+│   │   │   ├── bilibili/
+│   │   │   │   ├── client.py        # HTTP 客户端 · Cookie · 指纹 · 重试
+│   │   │   │   ├── wbi.py           # WBI 签名算法
+│   │   │   │   ├── login.py         # 扫码登录全流程
+│   │   │   │   └── adapter.py       # 视频/图文检索与结构归一化
+│   │   │   ├── douyin/
+│   │   │   │   ├── adapter.py       # 热榜 + 浏览器自动化搜索
+│   │   │   │   └── browser_search.py  # Playwright 绕过 a_bogus
+│   │   │   └── xiaohongshu/
+│   │   │       ├── adapter.py       # 笔记检索与结构归一化
+│   │   │       └── browser_search.py  # Playwright 绕过 X-s/X-t
 │   │   ├── recommend/
 │   │   │   ├── scorer.py            # 五维打分 + 质量体检
 │   │   │   ├── dedup.py             # 精确/模糊/作者配额三级去重
@@ -231,6 +237,43 @@ mixin_key 每 10 分钟刷新一次，且在网络返回 `-352/-403` 时自动�
 同时勾选 B 站与抖音时，B 站结果照常返回。
 
 热榜已单独暴露为 `GET /api/platforms/douyin/hot`，可作为降级内容或灵感入口。
+
+### 小红书平台的真实能力（重要，勿夸大）
+
+小红书已按同样架构接入（`app/platforms/xiaohongshu/adapter.py`），其 Web 端主力搜索接口
+`/api/sns/web/v1/search/notes` 受 `X-s` / `X-t` 动态签名保护 —— 小红书自研 JSVMP 混淆 SDK，
+与抖音 `a_bogus` 同级别难度。本项目**不逆向签名算法**，同样采用 **Playwright 浏览器自动化**绕开：
+
+| 能力 | 状态 | 实现方式 |
+|---|---|---|
+| 关键词搜索 | ✅ 可用（需登录态） | **浏览器自动化**：真实 Chromium 加载搜索页，页面 JS 自行生成 `X-s`/`X-t`，拦截 `search/notes` 响应 |
+| 账号登录 | ⚠️ 手动注入 | 无扫码流程，粘贴 Cookie 保留登录态 |
+
+#### 小红书搜索：强制登录（实测结论）
+
+与抖音「游客态能看第一屏」不同，小红书搜索页在**未登录状态直接弹登录墙**
+（`登录后查看搜索结果`），搜索接口请求根本不会发出。实测（headless + 无 Cookie）：
+
+- 页面只触发 `search/recommend`（联想词）等公开请求，`search/notes` **零请求**
+- 笔记卡片 DOM 为空，正文仅剩登录墙文案
+- 必须注入含 `web_session` 的有效 Cookie，`search/notes` 才会被触发
+
+因此搜索路径为：
+1. 打开 `xiaohongshu.com/search_result?keyword={关键词}`
+2. 页面 JS 自动发起 `search/notes`（带正确的 `X-s`/`X-t`），拦截其响应并解析
+3. 未登录时**快速失败并如实告知**「需要登录」，不再做无意义的 3 次重试
+
+#### 小红书手动注入 Cookie
+
+1. 浏览器打开 xiaohongshu.com 并**登录**（小红书 App 扫码 / 手机号）
+2. `F12` → Network → 任选一个 `edith.xiaohongshu.com` 请求 → Request Headers 里复制 `cookie` 的完整值
+3. 右上角头像 → 平台账号 → 小红书 → **+ 注入 Cookie** → 粘贴保存
+
+后端会检查 `web_session`（登录态核心）与 `a1` 等基础标识字段，缺失时明确告警。
+Cookie 与 B 站/抖音账号一样经 Fernet 加密存于本机 SQLite。
+
+> 已知限制：`search/notes` 返回的 `note_card` 不含播放量，笔记的点赞/收藏/评论/分享数真实返回。
+> 我们如实展示，不伪造数据。详情接口 `fetch_detail` 同样受 `X-s` 保护，当前未实现。
 
 ### 详情浮层：点击结果不跳走
 

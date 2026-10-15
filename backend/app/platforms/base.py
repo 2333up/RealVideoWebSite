@@ -167,6 +167,15 @@ class PlatformAdapter(ABC):
     async def verify_credentials(self, credentials: dict[str, Any]) -> tuple[bool, str]:
         """校验存量凭据是否仍然有效，返回 (是否有效, 说明)。"""
 
+    def extract_credential_uid(self, cookie_map: dict[str, str]) -> str:
+        """从平台 Cookie 中提取稳定 UID（用于重复注入时更新同一条记录）。
+
+        默认返回空串，由 account_service 回退到「已知登录字段 → cookie 指纹 md5」。
+        登录态字段超长（如小红书的 web_session）或语义无法直接作 UID 的平台，
+        应覆写此方法（通常取核心登录字段的 md5 前 16 位）。
+        """
+        return ""
+
     # ----------------------------- 元信息
     def describe(self) -> dict[str, Any]:
         return {

@@ -12,6 +12,8 @@ import ResultCard from './components/ResultCard'
 import LoginModal from './components/LoginModal'
 import AccountPanel from './components/AccountPanel'
 import VideoDetailModal from './components/VideoDetailModal'
+import XhsEmbedResult from './components/XhsEmbedResult'
+import DouyinEmbedResult from './components/DouyinEmbedResult'
 
 const ORDER_OPTIONS: { key: SearchOrder; label: string; hint: string }[] = [
   { key: 'relevance', label: '综合排序', hint: '沿用平台的原生综合相关度' },
@@ -125,6 +127,15 @@ export default function App() {
         setHasSearched(true)
         setNextPage(1 + PAGE_BATCH)
         setHasMore(false)
+      }
+
+      // 小红书 / 抖音走「整页嵌入」方案：不发结构化搜索请求，直接把官方搜索页
+      // 通过服务端代理嵌进 iframe。这样点击内容由平台自己渲染详情，
+      // 绕开「自建详情被风控」的问题。
+      if (selectedPlatform === 'xiaohongshu' || selectedPlatform === 'douyin') {
+        setLoading(false)
+        setLoadingMore(false)
+        return
       }
 
       const duration = DURATION_OPTIONS[durationIdx]
@@ -445,7 +456,69 @@ export default function App() {
 
       {/* ---------------- 结果区 ---------------- */}
       <main className="mx-auto max-w-[1400px] px-5 pb-6 pt-4">
-        {error ? (
+        {selectedPlatform === 'douyin' && hasSearched ? (
+          <DouyinEmbedResult
+            keyword={submitted}
+            onOpenVideo={(awemeId, cover) => {
+              // 构造最小 fallback（抖音详情接口未实现，浮层展示封面 + 站内打开原页）
+              const fallback: ContentCard = {
+                platform: 'douyin',
+                kind: 'video',
+                uid: awemeId,
+                title: '',
+                summary: '',
+                cover_url: cover,
+                page_url: `https://www.douyin.com/video/${awemeId}`,
+                author: { uid: '', name: '', avatar_url: '', homepage: '' },
+                published_at: null,
+                duration: null,
+                view_count: 0,
+                like_count: 0,
+                comment_count: 0,
+                favorite_count: 0,
+                coin_count: 0,
+                share_count: 0,
+                danmaku_count: 0,
+                tags: [],
+                score: 0,
+                score_detail: {},
+                extra: { aweme_id: awemeId },
+              }
+              setDetailTarget({ platform: 'douyin', uid: awemeId, fallback })
+            }}
+          />
+        ) : selectedPlatform === 'xiaohongshu' && hasSearched ? (
+          <XhsEmbedResult
+            keyword={submitted}
+            onOpenNote={(noteId, cover) => {
+              // 构造最小 fallback（详情浮层在 fetch_detail 到达前先顶上空位）
+              const fallback: ContentCard = {
+                platform: 'xiaohongshu',
+                kind: 'article',
+                uid: noteId,
+                title: '',
+                summary: '',
+                cover_url: cover,
+                page_url: `https://www.xiaohongshu.com/explore/${noteId}`,
+                author: { uid: '', name: '', avatar_url: '', homepage: '' },
+                published_at: null,
+                duration: null,
+                view_count: 0,
+                like_count: 0,
+                comment_count: 0,
+                favorite_count: 0,
+                coin_count: 0,
+                share_count: 0,
+                danmaku_count: 0,
+                tags: [],
+                score: 0,
+                score_detail: {},
+                extra: { note_id: noteId },
+              }
+              setDetailTarget({ platform: 'xiaohongshu', uid: noteId, fallback })
+            }}
+          />
+        ) : error ? (
           <div className="surface mx-auto max-w-md p-8 text-center">
             <div className="mb-3 text-4xl">🌐</div>
             <p className="text-sm font-medium text-ink-900">检索未能完成</p>

@@ -417,6 +417,104 @@ class BilibiliAdapter(PlatformAdapter):
             extra={"bvid": data.get("bvid", "")},
         )
 
+    # ============================================================ 播放地址 / 下载
+    async def get_playurl(
+        self, uid: str, cid: int | None = None, credentials: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """获取视频播放直链与分 P 信息，供下载使用。
+
+        调用 /x/player/playurl，需登录态 Cookie 才能拿高清（游客最高 480P，
+        登录最高 1080P，大会员更高）。返回结构：
+          {
+            "bvid": str, "aid": str, "title": str,
+            "pages": [{"cid": int, "page": int, "part": str, "duration": int}],
+            "current_cid": int, "quality": int, "quality_desc": str,
+            "formats": [{"quality": int, "desc": str}],
+            "durl": [{"url": str, "size": int, "length": int}],
+          }
+        """
+        # 先解析 bvid/aid；playurl 需要 bvid 与 cid
+        bvid = uid if not uid.isdigit() else ""
+        param_key = "aid" if uid.isdigit() else "bvid"
+
+        try:
+            view = await self.client.request_json(
+                "GET", "/x/web-interface/view",
+                params={param_key: uid}, credentials=credentials,
+            )
+        except BilibiliError as exc:
+            logger.warning("获取视频信息失败 %s: %s", uid, exc)
+            raise
+
+        bvid = view.get("bvid") or bvid
+        pages = view.get("pages") or []
+        cid_list = [p.get("cid") for p in pages if p.get("cid")]
+
+        if cid is None:
+            cid = cid_list[0] if cid_list else (view.get("cid") or 0)
+
+        # playurl 需要 Referer 指向视频页 + 登录态。
+        # 关键参数：
+        #   - qn=80 请求 1080P（游客会自动降级到其最高可用，如 720P/480P）。
+        #     不能写 qn=127（8K）：无大会员时接口直接报 -400「请求错误」。
+        #   - fnval=1 返回 durl（FLV 直链，可下载）；fnval=16 返回 dash 流（分片）。
+        payload: dict[str, Any] = {
+            "bvid": bvid,
+            "cid": cid,
+            "qn": 80,
+            "fnval": 1,
+            "fnver": 0,
+            "fourk": 1,
+        }
+        try:
+            play = await self.client.request_json(
+                "GET", "/x/player/playurl", params=payload, credentials=credentials,
+            )
+        except BilibiliError as exc:
+            logger.warning("获取播放地址失败 %s: %s", uid, exc)
+            raise
+
+        # 支持的清晰度列表（去重保序）
+        formats: list[dict[str, Any]] = []
+        seen_q: set[int] = set()
+        for f in play.get("support_formats") or []:
+            q = f.get("quality")
+            if q is None or q in seen_q:
+                continue
+            seen_q.add(q)
+            formats.append({"quality": q, "desc": f.get("new_description") or f.get("display_desc") or str(q)})
+        # 若 support_formats 为空，回退 durl 里的清晰度
+        if not formats:
+            for d in play.get("durl") or []:
+                formats.append({
+                    "quality": play.get("quality") or 0,
+                    "desc": play.get("quality") and f"{play.get('quality')}P" or "默认",
+                })
+
+        return {
+            "bvid": bvid,
+            "aid": str(view.get("aid") or ""),
+            "title": view.get("title") or "",
+            "pages": [
+                {
+                    "cid": p.get("cid"),
+                    "page": p.get("page"),
+                    "part": p.get("part") or "",
+                    "duration": p.get("duration"),
+                }
+                for p in pages
+            ],
+            "current_cid": cid,
+            "quality": play.get("quality"),
+            "quality_desc": play.get("quality") and str(play.get("quality")) or "",
+            "formats": formats,
+            "durl": [
+                {"url": d.get("url") or "", "size": d.get("size") or 0, "length": d.get("length") or 0}
+                for d in (play.get("durl") or [])
+                if d.get("url")
+            ],
+        }
+
     async def _fetch_tags(self, bvid: str) -> list[str]:
         """取视频标签。
 

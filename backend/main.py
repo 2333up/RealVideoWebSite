@@ -13,7 +13,9 @@ from app.core.database import init_db
 from app.platforms.base import registry
 from app.platforms.bilibili.adapter import BilibiliAdapter
 from app.platforms.douyin.adapter import DouyinAdapter
+from app.platforms.xiaohongshu.adapter import XiaohongshuAdapter
 from app.routers import account as account_router
+from app.routers import download as download_router
 from app.routers import embed as embed_router
 from app.routers import hot as hot_router
 from app.routers import search as search_router
@@ -44,6 +46,10 @@ async def lifespan(_app: FastAPI):
     douyin = DouyinAdapter()
     registry.register(douyin)
     _adapters.append(douyin)
+
+    xiaohongshu = XiaohongshuAdapter()
+    registry.register(xiaohongshu)
+    _adapters.append(xiaohongshu)
 
     logger.info("已注册平台: %s", ", ".join(registry.keys()))
 
@@ -79,6 +85,7 @@ app.include_router(search_router.router)
 app.include_router(account_router.router)
 app.include_router(hot_router.router)
 app.include_router(embed_router.router)
+app.include_router(download_router.router)
 
 
 @app.get("/api/health", tags=["system"])

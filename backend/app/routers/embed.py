@@ -56,6 +56,75 @@ async def bilibili_embed(bvid: str = Query(..., min_length=1), db: Session = Dep
     return HTMLResponse(content=html)
 
 
+@router.get("/platforms/xiaohongshu/embed", response_class=HTMLResponse)
+async def xiaohongshu_embed(keyword: str = Query(..., min_length=1), db: Session = Depends(get_db)):
+    """返回净化后的小红书搜索页，供前端以同源 iframe 嵌入。
+
+    方案 A：把小红书官方搜索页原样搬进来，用户直接看平台原生搜索结果，
+    点击笔记由小红书自己的页面渲染详情，绕开「自建详情」被风控的问题。
+    """
+    try:
+        adapter = registry.get("xiaohongshu")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="小红书平台未注册") from None
+
+    fetcher = getattr(adapter, "fetch_embed_html", None)
+    if fetcher is None:
+        raise HTTPException(status_code=404, detail="该平台不支持页面嵌入")
+
+    creds = None
+    try:
+        creds = await account_service.get_credentials_for(db, "xiaohongshu")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("获取小红书凭据失败，将以游客态渲染嵌入页: %s", exc)
+
+    try:
+        html = await fetcher(keyword, creds)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("抓取小红书搜索页失败: %s", exc)
+        return HTMLResponse(status_code=200, content=_fallback_page(str(exc)))
+
+    if not html:
+        return HTMLResponse(status_code=200, content=_fallback_page("小红书搜索页未能渲染（可能被风控）"))
+
+    return HTMLResponse(content=html)
+
+
+@router.get("/platforms/douyin/embed", response_class=HTMLResponse)
+async def douyin_embed(keyword: str = Query(..., min_length=1), db: Session = Depends(get_db)):
+    """返回净化后的抖音搜索页，供前端以同源 iframe 嵌入。
+
+    与小红书相同的「整页嵌入」方案：把抖音官方搜索页原样搬进来，
+    用户直接看平台原生搜索结果，点击视频由抖音自己的页面渲染详情，
+    绕开「自建详情被 a_bogus 风控」的问题。
+    """
+    try:
+        adapter = registry.get("douyin")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="抖音平台未注册") from None
+
+    fetcher = getattr(adapter, "fetch_embed_html", None)
+    if fetcher is None:
+        raise HTTPException(status_code=404, detail="该平台不支持页面嵌入")
+
+    creds = None
+    try:
+        creds = await account_service.get_credentials_for(db, "douyin")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("获取抖音凭据失败，将以游客态渲染嵌入页: %s", exc)
+
+    try:
+        html = await fetcher(keyword, creds)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("抓取抖音搜索页失败: %s", exc)
+        return HTMLResponse(status_code=200, content=_fallback_page(str(exc)))
+
+    if not html:
+        return HTMLResponse(status_code=200, content=_fallback_page("抖音搜索页未能渲染（可能被风控）"))
+
+    return HTMLResponse(content=html)
+
+
 def _fallback_page(reason: str) -> str:
     """嵌入页不可用时的提示页。"""
     return f"""<!doctype html>
@@ -65,14 +134,13 @@ def _fallback_page(reason: str) -> str:
   body {{ margin:0; height:100vh; display:flex; align-items:center; justify-content:center;
         font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
         background:#FAFAFA; color:#2C2F38; }}
-  .box {{ text-align:center; padding:28px 32px; }}
+  .box {{ text-align:center; padding:28px 32px; max-width:520px; }}
   .icon {{ font-size:40px; opacity:.35; margin-bottom:10px; }}
   h2 {{ margin:0 0 8px; font-size:15px; font-weight:600; }}
   p {{ margin:0; font-size:12px; color:#8A90A0; line-height:1.7; }}
 </style></head>
 <body><div class="box">
-  <div class="icon">📺</div>
+  <div class="icon">🔒</div>
   <h2>嵌入页面加载失败</h2>
-  <p>无法载入该视频页，请改用浮层内的详情与评论区，<br>或点击下方「在哔哩哔哩打开」。</p>
-  <p style="margin-top:10px;opacity:.6">{reason[:120]}</p>
+  <p>{reason[:200]}</p>
 </div></body></html>"""
