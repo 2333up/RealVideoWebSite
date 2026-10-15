@@ -1,0 +1,31 @@
+# video-mind · 后端依赖
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+sqlalchemy>=2.0.36
+pydantic>=2.9.0
+pydantic-settings>=2.6.0
+httpx>=0.28.0
+python-multipart>=0.0.20
+
+# 本地语音转写（GPU 加速）
+# 需要 CUDA 运行时；CPU 环境可保留，会自动降级为 int8
+faster-whisper>=1.1.0
+
+# GPU 转写额外需要 cuBLAS 12（ctranslate2 只自带 cuDNN 9，不含 cuBLAS）。
+# 缺了它会在真正开始推理时报
+#   RuntimeError: Library cublas64_12.dll is not found or cannot be loaded
+# 而「模型加载」这一步是能通过的，所以很容易误判成模型坏了。
+# 纯 CPU 用户不需要装（约 200MB）。
+nvidia-cublas-cu12; platform_system == "Windows" or platform_system == "Linux"
+
+# 注意：不要锁 av（PyAV）的版本。
+# faster-whisper 1.2.1 写死了 av.open(..., metadata_errors=...)，
+# 而 PyAV>=19 已移除该参数；但 14.x 及以下在 PyPI 上只有 sdist、
+# Windows 装它需要本地编译 FFmpeg，代价太大。
+# core/compat.py 会在运行时自动剥离该参数，两种版本都能跑。
+
+# .env 解析（config.py 自带轻量实现，此项可选）
+python-dotenv>=1.0.0
+
+# ---------------------------------------------------------------- 开发/测试
+pytest>=8.0.0

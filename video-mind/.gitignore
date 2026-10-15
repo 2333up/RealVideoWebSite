@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 密钥（绝不入库）
+.env
+*.key
+
+# 数据与产物
+data/
+!data/.gitkeep
+
+# 前端
+node_modules/
+dist/
+.vite/
+
+# 测试与缓存
+.pytest_cache/
+.coverage
