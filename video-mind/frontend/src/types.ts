@@ -123,6 +123,8 @@ export interface VideoDetail extends VideoSummary {
   mindmap: MindMapNode | null
   /** 该视频累计的模型用量；未分析过时为 null */
   token_usage: TokenUsage | null
+  /** 最近一次分析任务；从未分析过时为 null */
+  last_job: JobInfo | null
 }
 
 /** 一组 token 汇总 */
@@ -170,6 +172,24 @@ export interface Job {
   message: string
   error: string
   cancel_requested: boolean
+}
+
+/**
+ * 最近一次分析任务的状态与计时。
+ *
+ * elapsed_seconds 由服务端算：前端掐表的起点只能是「页面发现它开始处理」，
+ * 中途切走视频或刷新页面就断了，而且排队等别人的时间不该算进本次耗时。
+ */
+export interface JobInfo {
+  id: number
+  stage: string
+  progress: number
+  message: string
+  error: string
+  started_at: string | null
+  finished_at: string | null
+  elapsed_seconds: number | null
+  running: boolean
 }
 
 export interface ProviderInfo {

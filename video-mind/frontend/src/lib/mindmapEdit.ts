@@ -71,6 +71,57 @@ export function addChildNode(
   return { tree: next, id }
 }
 
+export function parentIdOf(tree: MindMapNode, id: string): string | null {
+  for (const c of tree.children ?? []) {
+    if (c.id === id) return tree.id ?? null
+    const hit = parentIdOf(c, id)
+    if (hit !== null) return hit
+  }
+  return null
+}
+
+/**
+ * 在指定节点**后面**插入一个同级节点。
+ *
+ * 键盘流里 Enter 就是这个语义（XMind 同款），没有它用户只能靠鼠标点父节点再点「+子」，
+ * 连续录入五六个要点时手感差别非常大。
+ */
+export function addSiblingNode(
+  tree: MindMapNode,
+  siblingId: string,
+): { tree: MindMapNode; id: string | null; reason?: string } {
+  if (tree.id === siblingId) {
+    return { tree, id: null, reason: '根节点没有同级节点' }
+  }
+
+  const next = cloneTree(tree)
+  const id = `new-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e4).toString(36)}`
+  const fresh: MindMapNode = { id, label: '新节点', start: null, scale: 1 }
+
+  function walk(node: MindMapNode): boolean {
+    const kids = node.children ?? []
+    const idx = kids.findIndex((k) => k.id === siblingId)
+    if (idx >= 0) {
+      if (kids.length >= MAX_CHILDREN) {
+        throw new Error(`单个节点最多挂 ${MAX_CHILDREN} 个子节点`)
+      }
+      node.children = [...kids.slice(0, idx + 1), fresh, ...kids.slice(idx + 1)]
+      return true
+    }
+    for (const k of kids) {
+      if (walk(k)) return true
+    }
+    return false
+  }
+
+  try {
+    if (!walk(next)) return { tree, id: null, reason: '目标节点不存在' }
+  } catch (e) {
+    return { tree, id: null, reason: (e as Error).message }
+  }
+  return { tree: next, id }
+}
+
 export function removeNodeById(
   tree: MindMapNode,
   id: string,

@@ -26,6 +26,17 @@ body {
   pointer-events: none;
 }
 
+/*
+  缩略图只当指示用，不接收鼠标事件。
+
+  它固定在右下角，一旦某个节点正好落在那一块，点击会被它吃掉——
+  表现为「这个节点怎么点都没反应」，且从截图上完全看不出来
+  （节点明明露在外面）。同理适用于任何覆盖在画布上的面板。
+*/
+.react-flow__minimap {
+  pointer-events: none;
+}
+
 /* 细滚动条，避免侧栏出现粗重的系统滚动条 */
 .thin-scroll::-webkit-scrollbar {
   width: 8px;

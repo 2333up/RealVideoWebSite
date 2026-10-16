@@ -20,6 +20,7 @@ import FolderList from './components/FolderList'
 import PanelResizer from './components/PanelResizer'
 import PanelRail from './components/PanelRail'
 import { makeSeekRequest, type SeekRequest } from './lib/seekRequest'
+import { formatElapsed } from './lib/format'
 
 export default function App() {
   // videos 始终是全量：分类树按 folder_id 就地分组渲染，不再按当前分类
@@ -40,6 +41,17 @@ export default function App() {
   const [busyHint, setBusyHint] = useState('')
   const [rightTab, setRightTab] = useState<'mindmap' | 'transcript'>('mindmap')
   const [seekRequest, setSeekRequest] = useState<SeekRequest | null>(null)
+  /**
+   * 分析刚刚结束的回执。
+   *
+   * 只在「状态从 processing 翻到 ready/failed」的那一刻产生：
+   * 直接看 detail.status === 'ready' 是不行的——刷新页面、切回这个视频
+   * 都会看到 ready，那就变成每次都弹一次「分析完成」。
+   */
+  const [finishNotice, setFinishNotice] = useState<{ ok: boolean; seconds: number | null } | null>(
+    null,
+  )
+  const prevStatusRef = useRef<string | null>(null)
   // 左右侧栏宽度与折叠状态。默认值从 localStorage 取，
   // 这样用户调好的布局在下次打开时还在——调过一次的东西不该每次重来。
   const [leftWidth, setLeftWidth] = useState(() => loadLayout().leftWidth)
@@ -114,6 +126,31 @@ export default function App() {
     const timer = setInterval(pollJob, 2000)
     return () => clearInterval(timer)
   }, [detail?.status, pollJob])
+
+  // 切视频时抹掉上一支的分析记忆，否则会看到「A 视频的分析完成了」挂在 B 视频上
+  useEffect(() => {
+    prevStatusRef.current = null
+    setFinishNotice(null)
+  }, [selectedId])
+
+  useEffect(() => {
+    const status = detail?.status ?? null
+    const prev = prevStatusRef.current
+    prevStatusRef.current = status
+    if (prev === 'processing' && (status === 'ready' || status === 'failed')) {
+      setFinishNotice({
+        ok: status === 'ready',
+        seconds: detail?.last_job?.elapsed_seconds ?? null,
+      })
+    }
+  }, [detail?.status, detail?.last_job?.elapsed_seconds])
+
+  // 回执自动消失，但不自动消失的才叫通知；给足 12 秒够看清耗时了
+  useEffect(() => {
+    if (!finishNotice) return
+    const timer = setTimeout(() => setFinishNotice(null), 12000)
+    return () => clearTimeout(timer)
+  }, [finishNotice])
 
   // ---------------------------------------------------------------- 交互
 
@@ -558,30 +595,117 @@ export default function App() {
                     </button>
                   </div>
 
-                  <div className="flex-1 min-h-0 p-3">
-                    {rightTab === 'mindmap' ? (
-                      detail.mindmap ? (
-                        <MindMap
-                          tree={detail.mindmap}
+                  {/*
+                    分析回执横幅：跑十几分钟的任务不给回执，
+                    用户不知道是成功了还是要重来。
+                  */}
+                  {finishNotice && (
+                    <div
+                      className={[
+                        'shrink-0 flex items-center gap-2 px-3 py-1.5 text-[11px] border-b',
+                        finishNotice.ok
+                          ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                          : 'bg-red-50 border-red-200 text-red-800',
+                      ].join(' ')}
+                    >
+                      <span className="shrink-0">
+                        {finishNotice.ok ? '分析完成' : '分析失败'}
+                      </span>
+                      {finishNotice.ok && finishNotice.seconds !== null && (
+                        <span className="tabular-nums">
+                          耗时 {formatElapsed(finishNotice.seconds)}
+                        </span>
+                      )}
+                      <span className="flex-1" />
+                      <button
+                        onClick={() => setFinishNotice(null)}
+                        className="shrink-0 px-1 text-gray-400 hover:text-gray-800"
+                        title="关闭提示"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  )}
+
+                  {/*
+                    遮罩挂在右栏这一层，而不是塞进 MindMap 组件里：
+                    首次分析时导图还不存在，App 里走的是「分析完成后自动生成」占位分支，
+                    MindMap 根本没被渲染——那恰恰是最需要提示的时刻。
+                  */}
+                  <div className="relative flex-1 min-h-0 p-3">
+                    <div
+                      className={[
+                        'w-full h-full transition',
+                        detail.status === 'processing'
+                          ? 'grayscale opacity-60 pointer-events-none select-none'
+                          : '',
+                      ].join(' ')}
+                    >
+                      {rightTab === 'mindmap' ? (
+                        detail.mindmap ? (
+                          <MindMap
+                            tree={detail.mindmap}
+                            videoId={detail.id}
+                            currentTime={currentTime}
+                            onSeek={seekTo}
+                            onSaveTree={saveMindmap}
+                          />
+                        ) : (
+                          <div className="text-xs text-gray-400 text-center py-8">
+                            {detail.status === 'ready'
+                              ? '暂无思维导图'
+                              : '分析完成后自动生成思维导图'}
+                          </div>
+                        )
+                      ) : detail.transcript ? (
+                        <Transcript
+                          segments={detail.transcript.segments}
                           currentTime={currentTime}
                           onSeek={seekTo}
-                          onSaveTree={saveMindmap}
                         />
                       ) : (
-                        <div className="text-xs text-gray-400 text-center py-8">
-                          {detail.status === 'ready'
-                            ? '暂无思维导图'
-                            : '分析完成后自动生成思维导图'}
+                        <div className="text-xs text-gray-400 text-center py-8">暂无转写内容</div>
+                      )}
+                    </div>
+
+                    {detail.status === 'processing' && (
+                      <div className="absolute inset-0 z-10 flex items-center justify-center">
+                        <div className="w-[82%] max-w-[330px] rounded-lg border border-gray-200 bg-white shadow-lg px-4 py-3.5">
+                          <div className="flex items-center gap-2 mb-2.5">
+                            <span className="w-3.5 h-3.5 rounded-full border-2 border-blue-500 border-t-transparent animate-spin shrink-0" />
+                            <span className="text-[13px] font-medium text-gray-800">
+                              正在分析中…
+                            </span>
+                          </div>
+
+                          <div className="text-[11px] text-gray-600 mb-2.5">
+                            {STAGE_LABELS[detail.last_job?.stage ?? ''] ?? '准备中…'}
+                            {detail.last_job?.message ? ` · ${detail.last_job.message}` : ''}
+                          </div>
+
+                          <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                            <div
+                              className="h-full bg-blue-500 rounded-full transition-all duration-500"
+                              style={{ width: `${Math.max(4, detail.last_job?.progress ?? 0)}%` }}
+                            />
+                          </div>
+
+                          <div className="mt-2 flex items-center text-[11px] text-gray-500">
+                            <span className="tabular-nums">
+                              已用时{' '}
+                              {detail.last_job?.elapsed_seconds != null
+                                ? formatElapsed(detail.last_job.elapsed_seconds)
+                                : '—'}
+                            </span>
+                            <span className="ml-auto">{detail.last_job?.progress ?? 0}%</span>
+                          </div>
+
+                          <p className="mt-2.5 text-[10px] text-gray-400 leading-relaxed">
+                            长视频转写较慢（1 小时视频 GPU 上约需 5-15 分钟），
+                            可以切到别的视频，处理在后台继续。
+                          </p>
                         </div>
-                      )
-                    ) : detail.transcript ? (
-                      <Transcript
-                        segments={detail.transcript.segments}
-                        currentTime={currentTime}
-                        onSeek={seekTo}
-                      />
-                    ) : (
-                      <div className="text-xs text-gray-400 text-center py-8">暂无转写内容</div>
+                      </div>
                     )}
                   </div>
                 </>
@@ -607,7 +731,9 @@ const LAYOUT_KEY = 'video-mind:layout.v1'
 const LEFT_MIN = 200
 const LEFT_MAX = 560
 const RIGHT_MIN = 300
-const DEFAULT_LAYOUT = { leftWidth: 256, rightWidth: 420, leftOpen: true, rightOpen: true }
+// 右栏默认 460：导图改成中心发散后，左右两个方向都要横向空间，
+// 420 会把两侧分支压得只剩标签头几个字。
+const DEFAULT_LAYOUT = { leftWidth: 256, rightWidth: 460, leftOpen: true, rightOpen: true }
 
 type LayoutState = typeof DEFAULT_LAYOUT
 
