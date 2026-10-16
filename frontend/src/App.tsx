@@ -58,6 +58,8 @@ export default function App() {
   const [result, setResult] = useState<SearchResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  // video-mind 可达性提示：服务没起时按钮要能说清楚，而不是默默开个死标签页
+  const [vmHint, setVmHint] = useState('')
   const [hasSearched, setHasSearched] = useState(false)
 
   const [order, setOrder] = useState<SearchOrder>('relevance')
@@ -229,6 +231,41 @@ export default function App() {
     [accounts, selectedPlatform],
   )
 
+  /**
+   * 打开 video-mind，先探可达性。
+   *
+   * mode: 'no-cors' 是这里的关键：跨域请求会被浏览器屏蔽响应体，但**连接失败
+   * 依然会 reject、连上了依然会 resolve**（只是拿到 opaque response）。
+   * 于是无需 CORS 配合就能判断「那个端口有没有服务在听」。
+   */
+  const openVideoMind = async () => {
+    setVmHint('')
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 2500)
+    let reachable = false
+    try {
+      await fetch(VIDEOMIND_URL, {
+        mode: 'no-cors',
+        cache: 'no-store',
+        signal: controller.signal,
+      })
+      reachable = true
+    } catch {
+      reachable = false
+    } finally {
+      clearTimeout(timer)
+    }
+
+    if (reachable) {
+      window.open(VIDEOMIND_URL, '_blank', 'noopener,noreferrer')
+      return
+    }
+    setVmHint(
+      `Video-Mind 未响应（${VIDEOMIND_URL}）。请先启动它：` +
+        'cd video-mind/frontend && npm run dev',
+    )
+  }
+
   const toggleKind = (kind: ContentKind) => {
     setKinds((prev) => {
       const next = prev.includes(kind) ? prev.filter((k) => k !== kind) : [...prev, kind]
@@ -285,17 +322,29 @@ export default function App() {
               </button>
             </form>
 
-            {/* 跳转 video-mind：独立的本地视频分析界面，开新标签页避免丢失当前搜索结果 */}
-            <button
-              type="button"
-              onClick={() => window.open(VIDEOMIND_URL, '_blank', 'noopener,noreferrer')}
-              className="flex shrink-0 items-center gap-1.5 rounded-lg border border-ink-100 bg-white py-1 pl-2 pr-2.5
-                         text-xs font-medium text-ink-700 transition-colors hover:border-ink-300"
-              title="打开 Video-Mind · 本地视频分章节与思维导图"
-            >
-              <span aria-hidden>🎬</span>
-              <span className="hidden md:block">Video-Mind</span>
-            </button>
+            {/* 跳转 video-mind：独立的本地视频分析界面，开新标签页避免丢失当前搜索结果。
+                打开前先探一下可达性 —— 否则服务没起时只会开出一个空白标签页，
+                用户看到的就是「点了没反应」。 */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => void openVideoMind()}
+                className="flex shrink-0 items-center gap-1.5 rounded-lg border border-ink-100 bg-white py-1 pl-2 pr-2.5
+                           text-xs font-medium text-ink-700 transition-colors hover:border-ink-300"
+                title={`打开 Video-Mind（${VIDEOMIND_URL}）· 本地视频分章节与思维导图`}
+              >
+                <span aria-hidden>🎬</span>
+                <span className="hidden md:block">Video-Mind</span>
+              </button>
+              {vmHint ? (
+                <div
+                  className="absolute right-0 top-full z-30 mt-1.5 w-72 rounded-lg border border-amber-200
+                             bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-800 shadow-lg"
+                >
+                  {vmHint}
+                </div>
+              ) : null}
+            </div>
 
             {/* 账号入口（精简高度） */}
             <button
