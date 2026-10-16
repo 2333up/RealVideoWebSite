@@ -89,6 +89,11 @@ class SearchParams:
     duration_max: int | None = None
     pubdate_begin: int | None = None
     pubdate_end: int | None = None
+    # 互动量门槛。None 表示不限制。
+    # 这类条件是**平台无关的表达**，但并非每个平台都拿得到对应数据：
+    # 拿不到的适配器应忽略该条件，而不是把结果清空（否则用户会以为真的没有内容）。
+    min_views: int | None = None  # 播放量下限
+    min_followers: int | None = None  # 作者粉丝量下限
 
 
 @dataclass(slots=True)
@@ -144,6 +149,9 @@ class PlatformAdapter(ABC):
     # 是否支持「手动粘贴 Cookie」方式接入账号。
     # 用于那些没有可行扫码流程、但持有浏览器 Cookie 即可提升权限的平台（如抖音）。
     manual_credential: ClassVar[bool] = False
+    # 是否支持「播放量 / 作者粉丝量」下限过滤。
+    # 需要平台能拿到这两类数据；拿不到的平台会忽略该条件而非返回空结果。
+    supports_thresholds: ClassVar[bool] = False
 
     # ----------------------------- 内容检索
     @abstractmethod
@@ -186,6 +194,7 @@ class PlatformAdapter(ABC):
             "supported_kinds": self.supported_kinds,
             "supports_login": self.supports_login,
             "manual_credential": self.manual_credential,
+            "supports_thresholds": self.supports_thresholds,
         }
 
 

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import re
@@ -115,11 +116,16 @@ class BilibiliAdapter(PlatformAdapter):
     homepage: ClassVar[str] = "https://www.bilibili.com"
     supported_kinds: ClassVar[list[ContentKind]] = ["video", "article"]
     supports_login: ClassVar[bool] = True
+    # 搜索结果自带播放量，粉丝量可查 /x/relation/stat，故两项门槛都可实现
+    supports_thresholds: ClassVar[bool] = True
 
     # ============================================================ 搜索
     def __init__(self) -> None:
         self.client = BilibiliClient()
         self.login = BilibiliLogin(self.client)
+        # 作者粉丝数缓存：一次搜索会命中多个 UP 主，同一个 mid 反复查会拖慢检索。
+        # 粉丝数变化很慢，进程内缓存足够（数量大时整体丢弃，避免无界增长）。
+        self._follower_cache: dict[str, int | None] = {}
 
     async def aclose(self) -> None:
         """释放底层 HTTP 连接池。
@@ -133,8 +139,6 @@ class BilibiliAdapter(PlatformAdapter):
         self, params: SearchParams, credentials: dict[str, Any] | None = None
     ) -> list[ContentItem]:
         """并行下探视频与图文两路，再合并交付推荐引擎。"""
-        import asyncio
-
         tasks: list[tuple[ContentKind, Any]] = []
         for kind in params.kinds:
             if kind == "video":
@@ -155,7 +159,82 @@ class BilibiliAdapter(PlatformAdapter):
                 logger.warning("B 站 %s 检索失败: %s", kind, result)
                 continue
             items.extend(result)
-        return items
+        return await self._apply_thresholds(items, params)
+
+    # ------------------------------------------------------------ 互动量过滤
+    async def _apply_thresholds(
+        self, items: list[ContentItem], params: SearchParams
+    ) -> list[ContentItem]:
+        """按播放量 / 粉丝量下限过滤。
+
+        播放量搜索结果里就有，直接比即可。粉丝量必须额外查 UP 主的关系接口
+        （/x/relation/stat），因此只对**去重后的作者**并发请求，避免同一 UP 主
+        的多条内容把请求量放大数十倍。
+
+        一个刻意的兜底：若所有粉丝数都查不到（接口异常/风控），**跳过粉丝量
+        过滤**而不是把结果清空 —— 让「接口抽风」表现为少一层过滤，而不是
+        「你搜的东西不存在」。
+        """
+        min_views = params.min_views
+        min_followers = params.min_followers
+        if not min_views and not min_followers:
+            return items
+
+        result = items
+        if min_views:
+            result = [i for i in result if i.view_count >= min_views]
+            logger.info("B 站播放量过滤（≥%s）：%d → %d 条", min_views, len(items), len(result))
+
+        if min_followers:
+            mids = list({i.author.uid for i in result if i.author.uid})
+            counts = await asyncio.gather(
+                *[self._fetch_follower_count(m) for m in mids],
+                return_exceptions=True,
+            )
+            follower_of: dict[str, int | None] = {}
+            for mid, value in zip(mids, counts):
+                follower_of[mid] = None if isinstance(value, BaseException) else value
+
+            resolved = [c for c in follower_of.values() if c is not None]
+            if not resolved:
+                logger.warning(
+                    "B 站粉丝数全部查询失败，跳过粉丝量过滤以免结果被清空（%d 位作者）",
+                    len(mids),
+                )
+            else:
+                before = len(result)
+                kept: list[ContentItem] = []
+                for item in result:
+                    count = follower_of.get(item.author.uid)
+                    if count is None:
+                        continue
+                    item.extra["follower_count"] = count
+                    if count >= min_followers:
+                        kept.append(item)
+                result = kept
+                logger.info(
+                    "B 站粉丝量过滤（≥%s）：%d → %d 条", min_followers, before, len(result)
+                )
+
+        return result
+
+    async def _fetch_follower_count(self, mid: str) -> int | None:
+        """查单个 UP 主的粉丝数（/x/relation/stat）。失败返回 None 而非抛出。"""
+        cached = self._follower_cache.get(mid)
+        if cached is not None or mid in self._follower_cache:
+            return cached
+        try:
+            data = await self.client.request_json(
+                "GET", "/x/relation/stat", params={"vmid": mid}
+            )
+            count = int((data or {}).get("follower") or 0)
+        except Exception as exc:  # noqa: BLE001 - 单个作者查询失败不影响整体
+            logger.warning("查询 UP 主粉丝数失败（mid=%s）: %s", mid, exc)
+            count = None
+        if len(self._follower_cache) > 500:
+            self._follower_cache.clear()
+        self._follower_cache[mid] = count
+        return count
 
     def _pagerange(self, params: SearchParams) -> list[int]:
         """待抓取的页码列表，从 params.page 起向后取 params.pages 页。"""

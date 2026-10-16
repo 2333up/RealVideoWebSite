@@ -21,6 +21,9 @@ class SearchRequest(BaseModel):
     order: Literal["relevance", "hot", "new"] = "relevance"
     duration_min: int | None = Field(None, ge=0, description="最短时长（秒）")
     duration_max: int | None = Field(None, ge=0, description="最长时长（秒）")
+    # 互动量门槛。平台拿不到对应数据时会忽略该条件（而非返回空结果）。
+    min_views: int | None = Field(None, ge=0, description="播放量下限")
+    min_followers: int | None = Field(None, ge=0, description="作者粉丝量下限")
     # 指定用于检索的账号 ID；为空则自动选用该平台的默认账号
     account_id: int | None = None
 

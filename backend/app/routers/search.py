@@ -46,6 +46,8 @@ async def do_search(payload: SearchRequest, db: Session = Depends(get_db)):
             order=payload.order,
             duration_min=payload.duration_min,
             duration_max=payload.duration_max,
+            min_views=payload.min_views,
+            min_followers=payload.min_followers,
             credentials_provider=credentials_provider,
             fetch_pages=payload.pages,
         )

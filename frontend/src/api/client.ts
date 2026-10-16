@@ -66,6 +66,10 @@ export interface SearchPayload {
   order: SearchOrder
   duration_min?: number | null
   duration_max?: number | null
+  /** 播放量下限；平台拿不到播放量时会忽略 */
+  min_views?: number | null
+  /** 作者粉丝量下限；平台查不到粉丝数时会忽略 */
+  min_followers?: number | null
   account_id?: number | null
 }
 
@@ -78,6 +82,8 @@ export interface PlatformMeta {
   supports_login: boolean
   // 支持手动粘贴 Cookie 接入（如抖音无可行扫码流程）
   manual_credential?: boolean
+  // 支持「播放量 / 粉丝量」下限过滤；不支持的平台应隐藏这类筛选项
+  supports_thresholds?: boolean
 }
 
 export interface AccountBrief {

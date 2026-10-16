@@ -35,6 +35,25 @@ const KIND_OPTIONS: { key: ContentKind; label: string }[] = [
   { key: 'article', label: '图文' },
 ]
 
+// 播放量 / 粉丝量门槛。数值取整档，避免让用户自己填数字。
+// 注意这两个条件只在 supports_thresholds 的平台（目前是 B 站）显示 ——
+// 拿不到数据的平台会忽略条件，显示出来等于给了个假开关。
+const VIEW_OPTIONS: { label: string; value: number | null }[] = [
+  { label: '不限', value: null },
+  { label: '≥1万', value: 10_000 },
+  { label: '≥10万', value: 100_000 },
+  { label: '≥50万', value: 500_000 },
+  { label: '≥100万', value: 1_000_000 },
+]
+
+const FOLLOWER_OPTIONS: { label: string; value: number | null }[] = [
+  { label: '不限', value: null },
+  { label: '≥1万粉', value: 10_000 },
+  { label: '≥10万粉', value: 100_000 },
+  { label: '≥50万粉', value: 500_000 },
+  { label: '≥100万粉', value: 1_000_000 },
+]
+
 // video-mind 前端开发地址；部署时可用 VITE_VIDEOMIND_URL 覆盖
 const VIDEOMIND_URL = import.meta.env.VITE_VIDEOMIND_URL ?? 'http://127.0.0.1:5273'
 
@@ -65,6 +84,9 @@ export default function App() {
   const [order, setOrder] = useState<SearchOrder>('relevance')
   const [kinds, setKinds] = useState<ContentKind[]>(['video', 'article'])
   const [durationIdx, setDurationIdx] = useState(0)
+  // 播放量 / 粉丝量门槛（null = 不限）。仅在平台声明 supports_thresholds 时可用。
+  const [minViews, setMinViews] = useState<number | null>(null)
+  const [minFollowers, setMinFollowers] = useState<number | null>(null)
 
   const [loginOpen, setLoginOpen] = useState(false)
   const [panelOpen, setPanelOpen] = useState(false)
@@ -155,6 +177,8 @@ export default function App() {
           order,
           duration_min: duration.min,
           duration_max: duration.max,
+          min_views: minViews,
+          min_followers: minFollowers,
         })
 
         setResult((prev) => {
@@ -182,7 +206,7 @@ export default function App() {
         setLoadingMore(false)
       }
     },
-    [durationIdx, kinds, nextPage, order, selectedPlatform],
+    [durationIdx, kinds, minFollowers, minViews, nextPage, order, selectedPlatform],
   )
 
   // 滚动到底部自动加载下一批。
@@ -208,7 +232,7 @@ export default function App() {
   // 筛选条件变化时自动重新检索（切换平台 / 排序 / 类型 / 时长均会命中）。
   // 依赖用字符串指纹而非数组/对象，避免引用变化导致的误触发；
   // 加 420ms 防抖，防止连续切换条件时连发请求打到平台风控。
-  const filterKey = `${selectedPlatform}|${order}|${kinds.join(',')}|${durationIdx}`
+  const filterKey = `${selectedPlatform}|${order}|${kinds.join(',')}|${durationIdx}|${minViews}|${minFollowers}`
   useEffect(() => {
     if (!hasSearched || !submitted || loading) return
     const timer = window.setTimeout(() => {
@@ -232,14 +256,16 @@ export default function App() {
   )
 
   /**
-   * 打开 video-mind，先探可达性。
+   * 探测 video-mind 是否可达，不可达时给出提示。
    *
    * mode: 'no-cors' 是这里的关键：跨域请求会被浏览器屏蔽响应体，但**连接失败
    * 依然会 reject、连上了依然会 resolve**（只是拿到 opaque response）。
    * 于是无需 CORS 配合就能判断「那个端口有没有服务在听」。
+   *
+   * 注意这里**只设置提示，不负责跳转**：跳转交给 <a target="_blank"> 完成。
+   * 若在此处 await 之后再 window.open，弹窗会被浏览器拦截。
    */
-  const openVideoMind = async () => {
-    setVmHint('')
+  const probeVideoMind = async () => {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 2500)
     let reachable = false
@@ -255,14 +281,10 @@ export default function App() {
     } finally {
       clearTimeout(timer)
     }
-
-    if (reachable) {
-      window.open(VIDEOMIND_URL, '_blank', 'noopener,noreferrer')
-      return
-    }
     setVmHint(
-      `Video-Mind 未响应（${VIDEOMIND_URL}）。请先启动它：` +
-        'cd video-mind/frontend && npm run dev',
+      reachable
+        ? ''
+        : `Video-Mind 未响应（${VIDEOMIND_URL}）。请先启动它：cd video-mind/frontend && npm run dev`,
     )
   }
 
@@ -322,20 +344,23 @@ export default function App() {
               </button>
             </form>
 
-            {/* 跳转 video-mind：独立的本地视频分析界面，开新标签页避免丢失当前搜索结果。
-                打开前先探一下可达性 —— 否则服务没起时只会开出一个空白标签页，
-                用户看到的就是「点了没反应」。 */}
+            {/* 用 <a target="_blank"> 而不是 window.open：
+                之前改成「先 await 探测再 window.open」，结果弹窗被浏览器拦截了 ——
+                异步之后已不属于用户手势直接触发，Chrome 会直接丢弃。
+                锚点跳转不受弹窗拦截限制；探测只用来出提示，不再阻断跳转。 */}
             <div className="relative">
-              <button
-                type="button"
-                onClick={() => void openVideoMind()}
+              <a
+                href={VIDEOMIND_URL}
+                target="_blank"
+                rel="noreferrer noopener"
+                onClick={() => void probeVideoMind()}
                 className="flex shrink-0 items-center gap-1.5 rounded-lg border border-ink-100 bg-white py-1 pl-2 pr-2.5
                            text-xs font-medium text-ink-700 transition-colors hover:border-ink-300"
                 title={`打开 Video-Mind（${VIDEOMIND_URL}）· 本地视频分章节与思维导图`}
               >
                 <span aria-hidden>🎬</span>
                 <span className="hidden md:block">Video-Mind</span>
-              </button>
+              </a>
               {vmHint ? (
                 <div
                   className="absolute right-0 top-full z-30 mt-1.5 w-72 rounded-lg border border-amber-200
@@ -486,6 +511,49 @@ export default function App() {
               ))}
             </div>
           </div>
+
+          {/* 播放量 / 粉丝量门槛。
+              只在平台声明 supports_thresholds 时渲染 —— 拿不到数据的平台
+              会忽略这些条件，摆出来就是个骗人的假开关。 */}
+          {platformMeta?.supports_thresholds ? (
+            <>
+              <span className="hidden h-5 w-px bg-ink-100 sm:block" />
+
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-medium text-ink-500">播放量</span>
+                <select
+                  value={minViews ?? ''}
+                  onChange={(e) => setMinViews(e.target.value ? Number(e.target.value) : null)}
+                  className="rounded-lg border border-ink-100 bg-slate-50 py-1 pl-2.5 pr-7 text-xs
+                             font-medium text-ink-700 focus:border-transparent focus:bg-white focus:ring-2
+                             focus:ring-ink-900/10"
+                >
+                  {VIEW_OPTIONS.map((opt) => (
+                    <option key={opt.label} value={opt.value ?? ''}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-medium text-ink-500">UP主粉丝</span>
+                <select
+                  value={minFollowers ?? ''}
+                  onChange={(e) => setMinFollowers(e.target.value ? Number(e.target.value) : null)}
+                  className="rounded-lg border border-ink-100 bg-slate-50 py-1 pl-2.5 pr-7 text-xs
+                             font-medium text-ink-700 focus:border-transparent focus:bg-white focus:ring-2
+                             focus:ring-ink-900/10"
+                >
+                  {FOLLOWER_OPTIONS.map((opt) => (
+                    <option key={opt.label} value={opt.value ?? ''}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </>
+          ) : null}
         </div>
       </div>
 
