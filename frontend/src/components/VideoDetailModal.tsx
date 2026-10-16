@@ -6,6 +6,7 @@ import {
   formatRelativeTime,
   type ContentCard,
   type PlayurlInfo,
+  type YoutubeStreamsInfo,
 } from '../api/client'
 import CommentSection from './CommentSection'
 
@@ -49,10 +50,19 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
   const xhsVideo = (detail?.extra?.video as string | undefined) ?? ''
   const isXhs = platform === 'xiaohongshu'
   const isBili = platform === 'bilibili'
+  const isYoutube = platform === 'youtube'
+  // YouTube 视频 ID：详情到位后用详情的 uid，否则退回列表传入的 uid
+  const ytId = isYoutube ? detail?.uid || uid : ''
+  // YouTube 官方 embed（隐私增强域名）。
+  // 注意：这是唯一一处由浏览器直连站方的播放器 —— 服务端能访问 YouTube 不代表
+  // 浏览器也能，浏览器不可达时会是空白框，故下面同时给出「在 YouTube 打开」入口。
+  const ytEmbedSrc = ytId ? `https://www.youtube-nocookie.com/embed/${ytId}` : ''
 
   // 下载弹窗状态
   const [showDownload, setShowDownload] = useState(false)
   const [playurlInfo, setPlayurlInfo] = useState<PlayurlInfo | null>(null)
+  const [ytStreams, setYtStreams] = useState<YoutubeStreamsInfo | null>(null)
+  const [ytFormatId, setYtFormatId] = useState('merge')
   const [downloadLoading, setDownloadLoading] = useState(false)
   const [downloadError, setDownloadError] = useState('')
   const [downloadCid, setDownloadCid] = useState<number | undefined>(undefined)
@@ -157,8 +167,27 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
     }
   }
 
-  // 打开下载弹窗：拉取播放直链信息（分 P + 清晰度）
+  // 打开下载弹窗：B 站拉播放直链（分 P + 清晰度），YouTube 拉可下载流列表
   const openDownload = async () => {
+    if (isYoutube) {
+      if (!ytId) return
+      setShowDownload(true)
+      setDownloadLoading(true)
+      setDownloadError('')
+      setYtStreams(null)
+      try {
+        const info = await api.fetchYoutubeStreams(ytId)
+        setYtStreams(info)
+        // 默认选「音视频合并」；后端没有 ffmpeg 时退到最高清的纯视频流
+        setYtFormatId(info.ffmpeg_available ? 'merge' : (info.streams[0]?.format_id ?? ''))
+      } catch (err) {
+        setDownloadError(err instanceof Error ? err.message : '获取下载信息失败')
+      } finally {
+        setDownloadLoading(false)
+      }
+      return
+    }
+
     if (!bvid) return
     setShowDownload(true)
     setDownloadLoading(true)
@@ -191,8 +220,13 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
     }
   }
 
-  // 触发下载：走后端代理（直链有防盗链，前端直下会 403）
+  // 触发下载：走后端代理（B 站直链有防盗链，YouTube 直链绑定 IP 且浏览器常不可达）
   const doDownload = () => {
+    if (isYoutube) {
+      if (!ytId || !ytFormatId) return
+      window.location.href = api.youtubeDownloadUrl(ytId, ytFormatId)
+      return
+    }
     if (!bvid) return
     const url = `/api/platforms/bilibili/download?bvid=${encodeURIComponent(bvid)}` +
       (downloadCid ? `&cid=${downloadCid}` : '')
@@ -224,8 +258,8 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
           </div>
 
           <div className="flex shrink-0 items-center gap-2">
-            {/* B 站视频下载入口 */}
-            {isBili && isVideo && bvid ? (
+            {/* 视频下载入口（B 站走播放直链，YouTube 走 yt-dlp 取流） */}
+            {(isBili && isVideo && bvid) || (isYoutube && ytId) ? (
               <button
                 type="button"
                 onClick={openDownload}
@@ -291,6 +325,23 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
         ) : (
           <>
             {/* ---- 播放器（仅视频）---- */}
+            {/* ---- YouTube：官方 embed 播放器 ---- */}
+            {/* 这是浏览器直连站方的一次尝试：播放能不能成取决于浏览器自身的网络。
+                服务端能访问 YouTube 不代表浏览器也能，所以下面还要保留
+                「在 YouTube 打开」入口作为兜底。 */}
+            {isYoutube && ytEmbedSrc ? (
+              <div className="aspect-video w-full bg-black">
+                <iframe
+                  src={ytEmbedSrc}
+                  title={detail?.title || 'YouTube 视频'}
+                  className="h-full w-full"
+                  frameBorder="0"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                  referrerPolicy="no-referrer"
+                />
+              </div>
+            ) : null}
             {/* ---- 视图片：站内页（代理后同源，已隐藏推荐与头部）---- */}
             {isVideo ? (
               viewMode === 'embed' && embedSrc ? (
@@ -487,6 +538,16 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
                         <Metric label="收藏" value={formatCount(detail.favorite_count)} />
                         <Metric label="分享" value={formatCount(detail.share_count)} />
                       </>
+                    ) : isYoutube ? (
+                      // YouTube 只拿得到播放量：点赞数不在详情页的 playerResponse 里，
+                      // 与其显示一个假的 0，不如不显示。
+                      <>
+                        <Metric label="播放" value={formatCount(detail.view_count)} />
+                        <Metric
+                          label="时长"
+                          value={detail.duration ? formatDuration(detail.duration) : '—'}
+                        />
+                      </>
                     ) : (
                       <>
                         <Metric label="播放" value={formatCount(detail.view_count)} />
@@ -529,12 +590,12 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
                       className="btn-primary mt-5 w-full !text-xs"
                       style={{ backgroundColor: accentColor }}
                     >
-                      在{platform === 'bilibili' ? '哔哩哔哩' : platform === 'douyin' ? '抖音' : '平台'}打开（含登录态）↗
+                      在{platform === 'bilibili' ? '哔哩哔哩' : platform === 'douyin' ? '抖音' : platform === 'youtube' ? 'YouTube' : '平台'}打开（含登录态）↗
                     </a>
                   ) : null}
 
                   {/* 评论区：同样取结构化数据自绘，不夹带平台推荐。小红书/抖音评论尚未接入，先禁用 */}
-                  <CommentSection platform={platform} uid={uid} enabled={!isXhs && platform !== 'douyin'} />
+                  <CommentSection platform={platform} uid={uid} enabled={!isXhs && platform !== 'douyin' && !isYoutube} />
                 </>
               ) : null}
             </div>
@@ -625,12 +686,101 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
                   开始下载（{playurlInfo.title || bvid}）
                 </button>
               </div>
+            ) : ytStreams ? (
+              <div className="space-y-4">
+                <div className="rounded-xl bg-slate-50 px-3 py-2.5 text-[11px] leading-relaxed text-ink-600">
+                  <p className="font-semibold text-ink-900">{ytStreams.title}</p>
+                  {ytStreams.ffmpeg_available ? (
+                    <p className="mt-1">✅ 已检测到 ffmpeg，可下载带声音的完整视频。</p>
+                  ) : (
+                    <p className="mt-1 text-amber-600">
+                      ⚠ 未检测到 ffmpeg。YouTube 只提供音视频分离的流，
+                      不装 ffmpeg 就只能下载纯视频（无声音）或纯音频。
+                    </p>
+                  )}
+                </div>
+
+                <div>
+                  <p className="mb-1.5 text-[11px] font-medium text-ink-500">选择格式</p>
+                  <div className="flex max-h-52 flex-col gap-1.5 overflow-y-auto">
+                    {ytStreams.ffmpeg_available ? (
+                      <button
+                        type="button"
+                        onClick={() => setYtFormatId('merge')}
+                        className={`rounded-lg px-3 py-1.5 text-left text-[11px] transition-colors ${
+                          ytFormatId === 'merge'
+                            ? 'bg-bilibili text-white'
+                            : 'bg-slate-100 text-ink-600 hover:bg-slate-200'
+                        }`}
+                      >
+                        🎬 音视频合并（最佳画质，需 ffmpeg 合成，耗时较长）
+                      </button>
+                    ) : null}
+                    {ytStreams.streams
+                      .filter((s) => s.has_video)
+                      .slice(0, 12)
+                      .map((s) => (
+                        <button
+                          key={s.format_id}
+                          type="button"
+                          onClick={() => setYtFormatId(s.format_id)}
+                          className={`rounded-lg px-3 py-1.5 text-left text-[11px] transition-colors ${
+                            ytFormatId === s.format_id
+                              ? 'bg-bilibili text-white'
+                              : 'bg-slate-100 text-ink-600 hover:bg-slate-200'
+                          }`}
+                        >
+                          {s.resolution || s.note} · {s.ext}
+                          <span className="opacity-70">
+                            {' '}
+                            （纯视频，无声音{formatSize(s.filesize)}）
+                          </span>
+                        </button>
+                      ))}
+                    {(() => {
+                      const bestAudio = ytStreams.streams
+                        .filter((s) => !s.has_video && s.has_audio)
+                        .sort((a, b) => b.abr - a.abr)[0]
+                      if (!bestAudio) return null
+                      return (
+                        <button
+                          type="button"
+                          onClick={() => setYtFormatId(bestAudio.format_id)}
+                          className={`rounded-lg px-3 py-1.5 text-left text-[11px] transition-colors ${
+                            ytFormatId === bestAudio.format_id
+                              ? 'bg-bilibili text-white'
+                              : 'bg-slate-100 text-ink-600 hover:bg-slate-200'
+                          }`}
+                        >
+                          🎵 仅音频（{Math.round(bestAudio.abr)}kbps
+                          {formatSize(bestAudio.filesize)}）
+                        </button>
+                      )
+                    })()}
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={doDownload}
+                  className="btn-primary w-full !text-xs"
+                  style={{ backgroundColor: accentColor }}
+                >
+                  {ytFormatId === 'merge' ? '开始下载（需服务端合并，请稍候）' : '开始下载（需服务端拉取，请稍候）'}
+                </button>
+              </div>
             ) : null}
           </div>
         </div>
       ) : null}
     </div>
   )
+}
+
+function formatSize(bytes: number): string {
+  if (!bytes) return ''
+  const mb = bytes / 1024 / 1024
+  return mb >= 1024 ? ` · ${(mb / 1024).toFixed(1)}GB` : ` · ${Math.round(mb)}MB`
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
