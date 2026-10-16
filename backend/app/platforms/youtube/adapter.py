@@ -81,6 +81,68 @@ _YTDLP_CLIENT_CHAIN: list[list[str]] = [
     ["android"],
 ]
 
+# 整页嵌入时注入的请求转发补丁。
+#
+# 为什么必须有它：把 YouTube 的 /watch 页面代理成同源后，页面里的 JS 会向
+# https://www.youtube.com/youtubei/v1/player 发 XHR 取播放数据。这个请求从
+# 我们的源（127.0.0.1:8000）发出属于跨域，而 YouTube 不会给我们回
+# Access-Control-Allow-Origin，于是播放器永远拿不到数据 —— 页面能显示，视频
+# 播不了，正是「显示了原网页却看不了」的形态。
+#
+# 因此把 YouTube 域下的 fetch / XHR 改道到我们自己的同源代理接口，
+# 由服务端带着代理配置去取，绕开 CORS。
+#
+# 注意：<script src> / <link> 这类标签加载不受 CORS 限制，仍直连 YouTube，
+# 只有 XHR 家族需要改道，不必把所有资源都搬回服务端。
+_YT_EMBED_SHIM = r"""
+<script>
+(function () {
+  var PREFIX = '/api/platforms/youtube/proxy?url=';
+  var ALLOW = ['youtube.com', 'ytimg.com', 'googlevideo.com', 'ggpht.com', 'gstatic.com'];
+  function allowed(host) {
+    return ALLOW.some(function (h) { return host === h || host.slice(-(h.length + 1)) === '.' + h; });
+  }
+  function rewrite(u) {
+    if (!u || typeof u !== 'string') return u;
+    if (u.indexOf(PREFIX) === 0) return u;          // 已改过道，别二次包裹
+    if (u.indexOf('/api/platforms/youtube/') === 0) return u;
+    try {
+      var abs = new URL(u, location.href);
+      if (!allowed(abs.hostname)) return u;
+      return PREFIX + encodeURIComponent(abs.href);
+    } catch (e) { return u; }
+  }
+
+  var _fetch = window.fetch;
+  window.fetch = function (input, init) {
+    try {
+      if (typeof input === 'string') {
+        arguments[0] = rewrite(input);
+      } else if (input && typeof input.url === 'string') {
+        var r = rewrite(input.url);
+        if (r !== input.url) { arguments[0] = new Request(r, input); }
+      }
+    } catch (e) {}
+    return _fetch.apply(this, arguments);
+  };
+
+  var _open = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (method, url) {
+    try { arguments[1] = rewrite(url); } catch (e) {}
+    return _open.apply(this, arguments);
+  };
+
+  var _beacon = navigator.sendBeacon && navigator.sendBeacon.bind(navigator);
+  if (_beacon) {
+    navigator.sendBeacon = function (url, data) {
+      try { url = rewrite(url); } catch (e) {}
+      return _beacon(url, data);
+    };
+  }
+})();
+</script>
+"""
+
 
 class YouTubeError(RuntimeError):
     def __init__(self, code: int, message: str) -> None:
@@ -489,6 +551,51 @@ class YouTubeAdapter(PlatformAdapter):
             return int(value)
         except (TypeError, ValueError):
             return 0
+
+    # ------------------------------------------------------------ 整页嵌入
+    async def fetch_embed_html(
+        self, video_id: str, credentials: dict[str, Any] | None = None
+    ) -> str:
+        """抓取 YouTube 原视频页，做成同源可嵌入的页面。
+
+        为什么不能直接 iframe 原网页：YouTube 的 /watch 带
+        `X-Frame-Options: SAMEORIGIN`，浏览器会直接拒绝任何跨域嵌入，
+        硬塞进 iframe 只会得到一个空白框。
+
+        因此由服务端取回 HTML 后同源返回，并做两件事让页面真正可用：
+          1. 注入 <base>，让页面里的相对路径（CSS / 图片）解析到 youtube.com
+          2. 注入请求转发补丁，把 YouTube 域的 XHR 改道到我们的同源代理，
+             否则播放器取不到数据（详见 _YT_EMBED_SHIM 的说明）
+
+        这里刻意**不做**净化：用户要的就是「原网页」，隐藏推荐区之类的处理
+        反而会破坏 YouTube 自己的布局。
+        """
+        client = await self._ensure_client()
+        try:
+            resp = await client.get(
+                WATCH_URL, params={"v": video_id, "hl": "zh-CN", "gl": "US"}
+            )
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.warning("抓取 YouTube 原页面失败（%s）: %s", video_id, exc)
+            return ""
+
+        html = resp.text
+
+        # 1. base 标签：相对路径资源才能正确指向 YouTube
+        base_tag = '<base href="https://www.youtube.com/">'
+        if "<head" in html:
+            html = html.replace("<head", "<head>\n" + base_tag, 1)
+        else:
+            html = base_tag + html
+
+        # 2. 请求转发补丁必须尽早执行，放在 <head> 最前面才能覆盖后续脚本发起的请求
+        if "<head" in html:
+            html = html.replace("<head", "<head>" + _YT_EMBED_SHIM, 1)
+        else:
+            html = _YT_EMBED_SHIM + html
+
+        return html
 
     # ------------------------------------------------------------ 下载
     @staticmethod

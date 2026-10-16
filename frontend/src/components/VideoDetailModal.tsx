@@ -53,10 +53,10 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
   const isYoutube = platform === 'youtube'
   // YouTube 视频 ID：详情到位后用详情的 uid，否则退回列表传入的 uid
   const ytId = isYoutube ? detail?.uid || uid : ''
-  // YouTube 官方 embed（隐私增强域名）。
-  // 注意：这是唯一一处由浏览器直连站方的播放器 —— 服务端能访问 YouTube 不代表
-  // 浏览器也能，浏览器不可达时会是空白框，故下面同时给出「在 YouTube 打开」入口。
-  const ytEmbedSrc = ytId ? `https://www.youtube-nocookie.com/embed/${ytId}` : ''
+  // YouTube 原页面：**必须走后端代理**，不能 iframe 站方地址 —— /watch 带
+  // X-Frame-Options: SAMEORIGIN，跨域嵌入会被浏览器直接拒绝，只得到空白框。
+  // 代理后同源返回，页面里的 XHR 也由后端的资源代理转发，播放器才能取到数据。
+  const ytEmbedSrc = ytId ? `/api/platforms/youtube/embed?video_id=${ytId}` : ''
 
   // 下载弹窗状态
   const [showDownload, setShowDownload] = useState(false)
@@ -348,15 +348,14 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
                 服务端能访问 YouTube 不代表浏览器也能，所以下面还要保留
                 「在 YouTube 打开」入口作为兜底。 */}
             {isYoutube && ytEmbedSrc ? (
-              <div className="aspect-video w-full bg-black">
+              <div className="h-[62vh] min-h-[380px] w-full bg-black">
                 <iframe
                   src={ytEmbedSrc}
-                  title={detail?.title || 'YouTube 视频'}
+                  title={detail?.title || 'YouTube 原页面'}
                   className="h-full w-full"
                   frameBorder="0"
                   allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                   allowFullScreen
-                  referrerPolicy="no-referrer"
                 />
               </div>
             ) : null}
