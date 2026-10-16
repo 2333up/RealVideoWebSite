@@ -18,6 +18,8 @@ import UsagePanel from './components/UsagePanel'
 import ImportPanel from './components/ImportPanel'
 import FolderList from './components/FolderList'
 import VideoList from './components/VideoList'
+import PanelResizer from './components/PanelResizer'
+import PanelRail from './components/PanelRail'
 import { makeSeekRequest, type SeekRequest } from './lib/seekRequest'
 
 export default function App() {
@@ -39,8 +41,18 @@ export default function App() {
   const [busyHint, setBusyHint] = useState('')
   const [rightTab, setRightTab] = useState<'mindmap' | 'transcript'>('mindmap')
   const [seekRequest, setSeekRequest] = useState<SeekRequest | null>(null)
+  // 左右侧栏宽度与折叠状态。默认值从 localStorage 取，
+  // 这样用户调好的布局在下次打开时还在——调过一次的东西不该每次重来。
+  const [leftWidth, setLeftWidth] = useState(() => loadLayout().leftWidth)
+  const [rightWidth, setRightWidth] = useState(() => loadLayout().rightWidth)
+  const [leftOpen, setLeftOpen] = useState(() => loadLayout().leftOpen)
+  const [rightOpen, setRightOpen] = useState(() => loadLayout().rightOpen)
 
   const playerRef = useRef<HTMLVideoElement>(null)
+
+  useEffect(() => {
+    saveLayout({ leftWidth, rightWidth, leftOpen, rightOpen })
+  }, [leftWidth, rightWidth, leftOpen, rightOpen])
 
   // ---------------------------------------------------------------- 数据加载
 
@@ -339,39 +351,65 @@ export default function App() {
       )}
 
       <div className="flex-1 flex min-h-0">
-        {/* 左：导入 + 分类 + 视频列表 */}
-        <aside className="w-64 bg-white border-r border-gray-200 flex flex-col shrink-0">
-          <ImportPanel
-            pickerAvailable={pickerInfo?.available ?? false}
-            pickerReason={pickerInfo?.reason ?? ''}
-            busy={busy}
-            busyHint={busyHint}
-            onPickFiles={doImportFiles}
-            onPickFolder={doImportFolder}
-            onPastePath={doImport}
-          />
+        {/* 左：导入 + 分类 + 视频列表。宽度可拖，可一键折叠。 */}
+        {leftOpen ? (
+          <>
+            <aside
+              style={{ width: leftWidth }}
+              className="bg-white border-r border-gray-200 flex flex-col shrink-0"
+            >
+              <div className="px-3 py-1.5 border-b border-gray-100 flex items-center shrink-0">
+                <span className="text-[11px] text-gray-500">视频库</span>
+                <button
+                  onClick={() => setLeftOpen(false)}
+                  title="折叠左侧栏"
+                  className="ml-auto text-[10px] px-1.5 py-0.5 rounded border border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-700"
+                >
+                  «
+                </button>
+              </div>
 
-          <FolderList
-            folders={folders}
-            active={activeFolder}
-            totalCount={allVideos.length}
-            unfiledCount={allVideos.filter((v) => v.folder_id === null).length}
-            onSelect={setActiveFolder}
-            onCreate={createFolder}
-            onRename={renameFolder}
-            onDelete={removeFolder}
-            onDropVideo={moveVideo}
-          />
+              <ImportPanel
+                pickerAvailable={pickerInfo?.available ?? false}
+                pickerReason={pickerInfo?.reason ?? ''}
+                busy={busy}
+                busyHint={busyHint}
+                onPickFiles={doImportFiles}
+                onPickFolder={doImportFolder}
+                onPastePath={doImport}
+              />
 
-          <VideoList
-            videos={videos}
-            selectedId={selectedId}
-            folders={folders}
-            onSelect={setSelectedId}
-            onAnalyze={startAnalysis}
-            onMove={moveVideo}
-          />
-        </aside>
+              <FolderList
+                folders={folders}
+                active={activeFolder}
+                totalCount={allVideos.length}
+                unfiledCount={allVideos.filter((v) => v.folder_id === null).length}
+                onSelect={setActiveFolder}
+                onCreate={createFolder}
+                onRename={renameFolder}
+                onDelete={removeFolder}
+                onDropVideo={moveVideo}
+              />
+
+              <VideoList
+                videos={videos}
+                selectedId={selectedId}
+                folders={folders}
+                onSelect={setSelectedId}
+                onAnalyze={startAnalysis}
+                onMove={moveVideo}
+              />
+            </aside>
+
+            <PanelResizer
+              label="调整视频库宽度"
+              onDelta={(dx) => setLeftWidth((w) => clamp(w + dx, LEFT_MIN, LEFT_MAX))}
+              onToggle={() => setLeftOpen(false)}
+            />
+          </>
+        ) : (
+          <PanelRail side="left" label="视频库" onExpand={() => setLeftOpen(true)} />
+        )}
 
         {/* 中：播放器 + 章节 */}
         <main className="flex-1 overflow-y-auto thin-scroll p-4">
@@ -484,69 +522,143 @@ export default function App() {
           )}
         </main>
 
-        {/* 右：思维导图 / 逐字稿 */}
-        <aside className="w-[420px] bg-white border-l border-gray-200 flex flex-col shrink-0">
-          {!detail ? (
-            <div className="text-xs text-gray-400 text-center py-8">选择视频后显示</div>
-          ) : (
-            <>
-              <div className="flex border-b border-gray-200 shrink-0">
-                {(
-                  [
-                    ['mindmap', '思维导图'],
-                    ['transcript', '逐字稿'],
-                  ] as const
-                ).map(([key, label]) => (
-                  <button
-                    key={key}
-                    onClick={() => setRightTab(key)}
-                    className={[
-                      'flex-1 px-3 py-2 text-xs font-medium transition',
-                      rightTab === key
-                        ? 'text-blue-600 border-b-2 border-blue-600'
-                        : 'text-gray-500 hover:text-gray-800',
-                    ].join(' ')}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
+        {/* 右：思维导图 / 逐字稿。宽度可拖、可一键折叠——
+            导图默认只有 420px，看大树时确实憋屈，所以这两块都要能自由放大。 */}
+        {rightOpen ? (
+          <>
+            <PanelResizer
+              label="调整导图区宽度"
+              onDelta={(dx) => setRightWidth((w) => clamp(w - dx, RIGHT_MIN, rightMax()))}
+              onToggle={() => setRightOpen(false)}
+            />
+            <aside
+              style={{ width: rightWidth }}
+              className="bg-white border-l border-gray-200 flex flex-col shrink-0"
+            >
+              {!detail ? (
+                <div className="text-xs text-gray-400 text-center py-8">选择视频后显示</div>
+              ) : (
+                <>
+                  <div className="flex border-b border-gray-200 shrink-0">
+                    {(
+                      [
+                        ['mindmap', '思维导图'],
+                        ['transcript', '逐字稿'],
+                      ] as const
+                    ).map(([key, label]) => (
+                      <button
+                        key={key}
+                        onClick={() => setRightTab(key)}
+                        className={[
+                          'flex-1 px-3 py-2 text-xs font-medium transition',
+                          rightTab === key
+                            ? 'text-blue-600 border-b-2 border-blue-600'
+                            : 'text-gray-500 hover:text-gray-800',
+                        ].join(' ')}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => setRightOpen(false)}
+                      title="折叠右侧栏"
+                      className="px-2 text-[11px] text-gray-400 hover:text-gray-700 hover:bg-gray-50"
+                    >
+                      »
+                    </button>
+                  </div>
 
-              <div className="flex-1 min-h-0 p-3">
-                {rightTab === 'mindmap' ? (
-                  detail.mindmap ? (
-                    <MindMap
-                      tree={detail.mindmap}
-                      currentTime={currentTime}
-                      onSeek={seekTo}
-                      onSaveTree={saveMindmap}
-                    />
-                  ) : (
-                    <div className="text-xs text-gray-400 text-center py-8">
-                      {detail.status === 'ready'
-                        ? '暂无思维导图'
-                        : '分析完成后自动生成思维导图'}
-                    </div>
-                  )
-                ) : detail.transcript ? (
-                  <Transcript
-                    segments={detail.transcript.segments}
-                    currentTime={currentTime}
-                    onSeek={seekTo}
-                  />
-                ) : (
-                  <div className="text-xs text-gray-400 text-center py-8">暂无转写内容</div>
-                )}
-              </div>
-            </>
-          )}
-        </aside>
+                  <div className="flex-1 min-h-0 p-3">
+                    {rightTab === 'mindmap' ? (
+                      detail.mindmap ? (
+                        <MindMap
+                          tree={detail.mindmap}
+                          currentTime={currentTime}
+                          onSeek={seekTo}
+                          onSaveTree={saveMindmap}
+                        />
+                      ) : (
+                        <div className="text-xs text-gray-400 text-center py-8">
+                          {detail.status === 'ready'
+                            ? '暂无思维导图'
+                            : '分析完成后自动生成思维导图'}
+                        </div>
+                      )
+                    ) : detail.transcript ? (
+                      <Transcript
+                        segments={detail.transcript.segments}
+                        currentTime={currentTime}
+                        onSeek={seekTo}
+                      />
+                    ) : (
+                      <div className="text-xs text-gray-400 text-center py-8">暂无转写内容</div>
+                    )}
+                  </div>
+                </>
+              )}
+            </aside>
+          </>
+        ) : (
+          <PanelRail side="right" label="思维导图" onExpand={() => setRightOpen(true)} />
+        )}
       </div>
 
       {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
       {showUsage && <UsagePanel onClose={() => setShowUsage(false)} />}
     </div>
   )
+}
+
+// ------------------------------------------------------------------ 布局状态
+
+const LAYOUT_KEY = 'video-mind:layout.v1'
+
+/** 侧栏宽度的下限：再窄按钮和文件名就挤成一团了 */
+const LEFT_MIN = 200
+const LEFT_MAX = 560
+const RIGHT_MIN = 300
+const DEFAULT_LAYOUT = { leftWidth: 256, rightWidth: 420, leftOpen: true, rightOpen: true }
+
+type LayoutState = typeof DEFAULT_LAYOUT
+
+function clamp(n: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, n))
+}
+
+function loadLayout(): LayoutState {
+  try {
+    const raw = localStorage.getItem(LAYOUT_KEY)
+    if (!raw) return DEFAULT_LAYOUT
+    const parsed = JSON.parse(raw) as Partial<LayoutState>
+    return {
+      leftWidth: clamp(Number(parsed.leftWidth) || DEFAULT_LAYOUT.leftWidth, LEFT_MIN, LEFT_MAX),
+      // 上限按当前窗口算：上次在 4K 屏上把右栏拉到 1200，
+      // 这次在小窗口打开就会把中间播放区挤没
+      rightWidth: clamp(
+        Number(parsed.rightWidth) || DEFAULT_LAYOUT.rightWidth,
+        RIGHT_MIN,
+        rightMax(),
+      ),
+      leftOpen: parsed.leftOpen !== false,
+      rightOpen: parsed.rightOpen !== false,
+    }
+  } catch {
+    // 存档损坏就用默认值，不该因为一个坏掉的 JSON 让整个界面打不开
+    return DEFAULT_LAYOUT
+  }
+}
+
+function saveLayout(state: LayoutState): void {
+  try {
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify(state))
+  } catch {
+    /* 隐私模式下写不了，忽略即可 */
+  }
+}
+
+/** 右栏上限：给中间播放区至少留 420px，否则视频小得没法看 */
+function rightMax(): number {
+  return Math.max(RIGHT_MIN, (typeof window === 'undefined' ? 1440 : window.innerWidth) - 420)
 }
 
 // ------------------------------------------------------------------ 小组件

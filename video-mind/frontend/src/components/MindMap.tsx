@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Background,
   Controls,
@@ -7,6 +7,8 @@ import {
   MiniMap,
   Position,
   ReactFlow,
+  ReactFlowProvider,
+  useReactFlow,
   type Edge,
   type Node,
   type NodeProps,
@@ -294,7 +296,19 @@ interface Props {
   onSaveTree: (tree: MindMapNode) => Promise<void>
 }
 
-export default function MindMap({ tree, currentTime, onSeek, onSaveTree }: Props) {
+export default function MindMap(props: Props) {
+  // useReactFlow 必须在 Provider 内部使用，所以外层只负责套一层 Provider。
+  // 需要它才能拿到 fitView：面板变宽后要让导图重新铺满，而不是留一片空白。
+  return (
+    <ReactFlowProvider>
+      <MindMapCanvas {...props} />
+    </ReactFlowProvider>
+  )
+}
+
+function MindMapCanvas({ tree, currentTime, onSeek, onSaveTree }: Props) {
+  const { fitView } = useReactFlow()
+  const wrapRef = useRef<HTMLDivElement>(null)
   const [editing, setEditing] = useState<EditingTarget>(null)
   const [saving, setSaving] = useState(false)
 
@@ -440,18 +454,54 @@ export default function MindMap({ tree, currentTime, onSeek, onSaveTree }: Props
     [onSeek],
   )
 
+  /**
+   * 面板被拖宽/拖窄后自动重新铺满画布。
+   *
+   * 不做这件事的话，把右栏从 420 拉到 900 只会多出一片空白，
+   * 树还挤在左边——用户会觉得「放大了没用」。
+   *
+   * 只在宽度变化超过 60px 时才重新适应：拖动过程中的每像素抖动都 refit
+   * 会让人眼晕，也会把用户手动调好的缩放冲掉。
+   */
+  useEffect(() => {
+    const el = wrapRef.current
+    if (!el) return
+    let lastWidth = 0
+    let timer: number | undefined
+
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width ?? 0
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => {
+        const meaningful = lastWidth === 0 || Math.abs(width - lastWidth) >= 60
+        lastWidth = width
+        if (meaningful) fitView({ padding: 0.15, duration: 200 })
+      }, 250)
+    })
+    observer.observe(el)
+    return () => {
+      observer.disconnect()
+      window.clearTimeout(timer)
+    }
+  }, [fitView])
+
   return (
     <div className="w-full h-full flex flex-col bg-white rounded-lg border border-gray-200 overflow-hidden">
       <div className="px-2.5 py-1.5 border-b border-gray-100 flex items-center gap-2 shrink-0">
         <span className="text-[10px] text-gray-400">
           双击改内容 · 点节点跳转 · 设时间戳会自动生成章节
         </span>
-        <span className="ml-auto text-[10px] text-gray-400">
-          {saving ? '保存中…' : ''}
-        </span>
+        <button
+          onClick={() => fitView({ padding: 0.15, duration: 200 })}
+          title="把整张导图缩放到当前面板大小"
+          className="text-[10px] px-1.5 py-0.5 rounded border border-gray-200 text-gray-500 hover:bg-gray-50 hover:text-gray-800"
+        >
+          适应画布
+        </button>
+        <span className="text-[10px] text-gray-400">{saving ? '保存中…' : ''}</span>
       </div>
 
-      <div className="flex-1 min-h-0">
+      <div ref={wrapRef} className="flex-1 min-h-0">
         <ReactFlow
           key={key}
           nodes={nodes}
