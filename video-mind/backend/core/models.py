@@ -33,21 +33,36 @@ def _now() -> datetime:
 class Folder(Base):
     """视频分类文件夹（应用内概念，与磁盘目录无关）。
 
-    刻意做成**单层**：这是给已导入视频「打标签/归类」的功能，不是文件系统的
-    镜像。一旦支持嵌套，侧栏就变成树形选择器，而真实场景里一层分类已经够用。
+    支持**多级嵌套**：parent_id 指向父分类，None 表示根级。
+
+    为什么从单层改成多级：单层时「课程 / 进阶」这种天然的两级关系只能拍平成
+    「课程-进阶」，层级一多就变成一堆靠命名约定维系的平级条目，既难看又不可
+    靠。层级关系本身就是信息，应该由结构表达，而不是靠名字里的分隔符去猜。
 
     注意这不是表里加一列就能解决的事：一个文件夹要装多个视频，反过来一个视频
-    只能属于一个文件夹，所以是 folders 主表 + videos.folder_id 外键。
+    只能属于一个文件夹，所以是 folders 主表 + videos.folder_id 外键；而层级是
+    folders 表自己的自引用外键。
+
+    重名规则是「同一父级下不能同名」，不是全局唯一——「课程/进阶」和
+    「项目/进阶」应当共存。这条约束放在应用层校验（见 routers/folders.py），
+    因为 SQLite 的唯一索引认为多个 NULL 互不相同，根级同名会漏过去。
     """
 
     __tablename__ = "folders"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    #: 同名文件夹会让人分不清（尤其从磁盘目录自动创建时），因此唯一约束
-    name: Mapped[str] = mapped_column(String(128), default="", index=True, unique=True)
+    name: Mapped[str] = mapped_column(String(128), default="", index=True)
+    #: 父分类；None = 根级。删除父分类时子分类会被提升一层，不会被连带删掉
+    parent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("folders.id", ondelete="SET NULL"), nullable=True, default=None, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
     videos: Mapped[list["Video"]] = relationship(back_populates="folder")
+    children: Mapped[list["Folder"]] = relationship(back_populates="parent")
+    parent: Mapped["Folder | None"] = relationship(
+        back_populates="children", remote_side=[id]
+    )
 
 
 class Video(Base):

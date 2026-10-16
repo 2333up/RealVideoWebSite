@@ -52,10 +52,12 @@ export interface VideoSummary {
   has_transcript: boolean
 }
 
-/** 应用内分类文件夹（与磁盘目录无关，只是给视频打组） */
+/** 应用内分类文件夹（与磁盘目录无关，只是给视频打组）；支持多级嵌套 */
 export interface Folder {
   id: number
   name: string
+  /** 父分类 id；null = 根级 */
+  parent_id: number | null
   video_count: number
   created_at: string | null
 }
