@@ -158,12 +158,23 @@ export const api = {
         `&page=${page}&page_size=${pageSize}&sort=${sort}`,
     ),
 
-  /** 获取 B 站视频播放直链信息（分 P + 清晰度），供下载 */
-  fetchPlayurl: (bvid: string, cid?: number) =>
+  /** 获取 B 站视频播放直链信息（分 P + 清晰度），供下载。
+   *  qn 为目标清晰度代码（取自 formats[].quality），不传则由平台决定。 */
+  fetchPlayurl: (bvid: string, cid?: number, qn?: number) =>
     request<PlayurlInfo>(
       `/platforms/bilibili/playurl?bvid=${encodeURIComponent(bvid)}` +
-        (cid ? `&cid=${cid}` : ''),
+        (cid ? `&cid=${cid}` : '') +
+        (qn ? `&qn=${qn}` : ''),
     ),
+
+  /**
+   * B 站下载直链（走后端代理：直链有 Referer + Cookie 防盗链，前端直下会 403）。
+   * qn 不传则由平台决定清晰度。
+   */
+  bilibiliDownloadUrl: (bvid: string, cid?: number, qn?: number) =>
+    `/api/platforms/bilibili/download?bvid=${encodeURIComponent(bvid)}` +
+    (cid ? `&cid=${cid}` : '') +
+    (qn ? `&qn=${qn}` : ''),
 
   /** 获取 YouTube 视频可下载流列表（清晰度 / 是否含音轨） */
   fetchYoutubeStreams: (videoId: string) =>

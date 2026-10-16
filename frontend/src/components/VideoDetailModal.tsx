@@ -66,6 +66,8 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
   const [downloadLoading, setDownloadLoading] = useState(false)
   const [downloadError, setDownloadError] = useState('')
   const [downloadCid, setDownloadCid] = useState<number | undefined>(undefined)
+  // B 站目标清晰度（qn）。不传时平台自行决定，选定后下载与切分 P 都带上它
+  const [downloadQn, setDownloadQn] = useState<number | undefined>(undefined)
 
   // 走服务端代理而非直接 iframe 站方页面：
   // 同源后注入的 CSS 才能生效（藏掉推荐区），且能带上库中保存的登录态。
@@ -193,6 +195,7 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
     setDownloadLoading(true)
     setDownloadError('')
     setPlayurlInfo(null)
+    setDownloadQn(undefined)
     try {
       const info = await api.fetchPlayurl(bvid)
       setPlayurlInfo(info)
@@ -204,17 +207,34 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
     }
   }
 
-  // 切换分 P：重新拉取该 cid 的播放地址
+  // 切换分 P：重新拉取该 cid 的播放地址（保持已选清晰度）
   const switchCid = async (cid: number) => {
     if (!bvid) return
     setDownloadCid(cid)
     setDownloadLoading(true)
     setDownloadError('')
     try {
-      const info = await api.fetchPlayurl(bvid, cid)
+      const info = await api.fetchPlayurl(bvid, cid, downloadQn)
       setPlayurlInfo(info)
     } catch (err) {
       setDownloadError(err instanceof Error ? err.message : '获取下载信息失败')
+    } finally {
+      setDownloadLoading(false)
+    }
+  }
+
+  // 切换清晰度：必须重新请求 playurl —— 不同清晰度的直链完全不同，
+  // 沿用旧 durl 只会下到原来那一档。
+  const switchQuality = async (qn: number) => {
+    if (!bvid) return
+    setDownloadQn(qn)
+    setDownloadLoading(true)
+    setDownloadError('')
+    try {
+      const info = await api.fetchPlayurl(bvid, downloadCid, qn)
+      setPlayurlInfo(info)
+    } catch (err) {
+      setDownloadError(err instanceof Error ? err.message : '获取该清晰度的下载地址失败')
     } finally {
       setDownloadLoading(false)
     }
@@ -228,9 +248,7 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
       return
     }
     if (!bvid) return
-    const url = `/api/platforms/bilibili/download?bvid=${encodeURIComponent(bvid)}` +
-      (downloadCid ? `&cid=${downloadCid}` : '')
-    window.location.href = url
+    window.location.href = api.bilibiliDownloadUrl(bvid, downloadCid, downloadQn)
   }
 
   return (
@@ -659,7 +677,7 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
                   </div>
                 ) : null}
 
-                {/* 清晰度信息 */}
+                {/* 清晰度信息 + 选择 */}
                 <div className="rounded-xl bg-slate-50 px-3 py-2.5 text-[11px] leading-relaxed text-ink-600">
                   <p>
                     当前可下载清晰度：
@@ -667,13 +685,37 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
                       {playurlInfo.quality_desc || `${playurlInfo.quality}P`}
                     </span>
                   </p>
-                  <p className="mt-1 text-ink-400">
-                    {playurlInfo.formats.length > 0
-                      ? `支持：${playurlInfo.formats.map((f) => f.desc).join(' / ')}`
-                      : ''}
-                  </p>
-                  <p className="mt-1 text-amber-600">
-                    ⚠ 清晰度上限取决于登录态（游客 480P，登录 1080P，大会员更高）。
+                  {playurlInfo.formats.length > 0 ? (
+                    <div className="mt-2">
+                      <p className="mb-1.5 text-[11px] font-medium text-ink-500">选择清晰度</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {playurlInfo.formats.map((f) => {
+                          // 未手动选过时，高亮平台实际给的那一档
+                          const active =
+                            downloadQn !== undefined
+                              ? downloadQn === f.quality
+                              : playurlInfo.quality === f.quality
+                          return (
+                            <button
+                              key={f.quality}
+                              type="button"
+                              onClick={() => void switchQuality(f.quality)}
+                              className={`rounded-lg px-2.5 py-1 text-[11px] transition-colors ${
+                                active
+                                  ? 'bg-bilibili text-white'
+                                  : 'bg-white text-ink-600 hover:bg-slate-200'
+                              }`}
+                            >
+                              {f.desc}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  ) : null}
+                  <p className="mt-2 text-amber-600">
+                    ⚠ 清晰度上限取决于登录态（游客 480P，登录 1080P，大会员更高）；
+                    选了拿不到的档位会自动降级到可用的最高档。
                   </p>
                 </div>
 

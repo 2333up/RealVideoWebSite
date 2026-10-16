@@ -38,6 +38,7 @@ router = APIRouter(prefix="/api", tags=["download"])
 async def bilibili_playurl(
     bvid: str = Query(..., min_length=1),
     cid: int | None = Query(None),
+    qn: int | None = Query(None, description="目标清晰度代码，取自 formats[].quality；不传则由平台决定"),
     db: Session = Depends(get_db),
 ):
     """返回视频的播放直链信息（分 P 列表 + 清晰度列表）。"""
@@ -49,7 +50,7 @@ async def bilibili_playurl(
     creds = await account_service.get_credentials_for(db, "bilibili")
 
     try:
-        info = await adapter.get_playurl(bvid, cid, creds)
+        info = await adapter.get_playurl(bvid, cid, creds, qn=qn)
     except Exception as exc:  # noqa: BLE001
         logger.exception("获取 B 站播放地址失败: %s", exc)
         raise HTTPException(status_code=502, detail=f"获取播放地址失败: {exc}") from exc
@@ -64,6 +65,7 @@ async def bilibili_playurl(
 async def bilibili_download(
     bvid: str = Query(..., min_length=1),
     cid: int | None = Query(None),
+    qn: int | None = Query(None, description="目标清晰度代码；不传则由平台决定"),
     db: Session = Depends(get_db),
 ):
     """流式代理下载视频，返回带正确文件名的二进制流。
@@ -79,7 +81,7 @@ async def bilibili_download(
     creds = await account_service.get_credentials_for(db, "bilibili")
 
     try:
-        info = await adapter.get_playurl(bvid, cid, creds)
+        info = await adapter.get_playurl(bvid, cid, creds, qn=qn)
     except Exception as exc:  # noqa: BLE001
         logger.exception("获取 B 站下载地址失败: %s", exc)
         raise HTTPException(status_code=502, detail=f"获取下载地址失败: {exc}") from exc

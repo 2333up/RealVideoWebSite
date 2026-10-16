@@ -419,7 +419,11 @@ class BilibiliAdapter(PlatformAdapter):
 
     # ============================================================ 播放地址 / 下载
     async def get_playurl(
-        self, uid: str, cid: int | None = None, credentials: dict[str, Any] | None = None
+        self,
+        uid: str,
+        cid: int | None = None,
+        credentials: dict[str, Any] | None = None,
+        qn: int | None = None,
     ) -> dict[str, Any]:
         """获取视频播放直链与分 P 信息，供下载使用。
 
@@ -432,6 +436,10 @@ class BilibiliAdapter(PlatformAdapter):
             "formats": [{"quality": int, "desc": str}],
             "durl": [{"url": str, "size": int, "length": int}],
           }
+
+        :param qn: 请求的目标清晰度代码（取 support_formats 里的 quality）。
+            不传则用 80（1080P）——B 站会在权限不足时自动降级到可用的最高档，
+            因此「不传」永远能拿到东西；传了则尽力满足该档，拿不到会如实报错。
         """
         # 先解析 bvid/aid；playurl 需要 bvid 与 cid
         bvid = uid if not uid.isdigit() else ""
@@ -457,11 +465,13 @@ class BilibiliAdapter(PlatformAdapter):
         # 关键参数：
         #   - qn=80 请求 1080P（游客会自动降级到其最高可用，如 720P/480P）。
         #     不能写 qn=127（8K）：无大会员时接口直接报 -400「请求错误」。
+        #     用户选定清晰度时传入对应 qn；取不到该档时接口会自行降级，
+        #     降级结果由响应里的 quality 如实回报，不伪造。
         #   - fnval=1 返回 durl（FLV 直链，可下载）；fnval=16 返回 dash 流（分片）。
         payload: dict[str, Any] = {
             "bvid": bvid,
             "cid": cid,
-            "qn": 80,
+            "qn": int(qn) if qn else 80,
             "fnval": 1,
             "fnver": 0,
             "fourk": 1,
@@ -491,6 +501,12 @@ class BilibiliAdapter(PlatformAdapter):
                     "desc": play.get("quality") and f"{play.get('quality')}P" or "默认",
                 })
 
+        # 实际拿到的清晰度（可能与请求的不同 —— 权限不足时会被降级）。
+        # 用 support_formats 里的描述把它翻译成人话，而不是甩一个裸数字给前端。
+        actual_q = play.get("quality") or 0
+        desc_by_q = {f["quality"]: f["desc"] for f in formats}
+        quality_desc = desc_by_q.get(actual_q) or (f"{actual_q}P" if actual_q else "")
+
         return {
             "bvid": bvid,
             "aid": str(view.get("aid") or ""),
@@ -505,8 +521,8 @@ class BilibiliAdapter(PlatformAdapter):
                 for p in pages
             ],
             "current_cid": cid,
-            "quality": play.get("quality"),
-            "quality_desc": play.get("quality") and str(play.get("quality")) or "",
+            "quality": actual_q,
+            "quality_desc": quality_desc,
             "formats": formats,
             "durl": [
                 {"url": d.get("url") or "", "size": d.get("size") or 0, "length": d.get("length") or 0}
