@@ -333,3 +333,14 @@ Cookie 与 B 站/抖音账号一样经 Fernet 加密存于本机 SQLite。
 保留下来但不启用的另一处经验：连载剧集去重豁免。
 `dedup.py` 的 `is_duplicate_pair` 会识别「第1集/第2集」「EP01/EP02」这类仅编号不同的标题，
 判定为不同内容予以保留 —— 否则整季连载会被当成一条内容砍掉（实测相似度高达 0.86）。
+
+---
+
+## 参与开发
+
+团队协作的全部约定见 [`CONTRIBUTING.md`](CONTRIBUTING.md)：分支模型、提交规范、PR 与 Code Review、
+代码风格、安全红线、新平台接入步骤。
+
+仓库维护者（协作者权限、分支保护、默认分支）请另外看 [`docs/GITHUB_SETUP.md`](docs/GITHUB_SETUP.md)。
+
+开源许可：[MIT](LICENSE)。

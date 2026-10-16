@@ -1,0 +1,20 @@
+# 统一换行符：仓库内一律 LF，检出时不自动转换
+# 所有协作者请执行：git config core.autocrlf false
+* text=auto eol=lf
+
+# 明确声明二进制文件，避免 diff / 合并时被当作文本处理
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.mp4 binary
+*.db binary
+*.sqlite3 binary
+
+# 锁文件在 diff 中折叠显示，避免 PR 里出现几千行噪音
+package-lock.json linguist-generated=true -diff

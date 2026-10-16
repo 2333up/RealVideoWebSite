@@ -1,0 +1,54 @@
+name: Bug 反馈
+description: 报告一个可复现的缺陷
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: dropdown
+    id: side
+    attributes:
+      label: 出现位置
+      options:
+        - 后端接口
+        - 前端界面
+        - 搜索 / 排序
+        - 详情 / 评论
+        - 账号登录
+        - 一键启动脚本
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 请写清平台、排序方式、关键词、加载了几批
+      placeholder: |
+        1. 选择 B 站 / 综合排序 / 仅视频
+        2. 搜索「美国老爹」
+        3. 连续加载 3 批
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+      description: 附上后端日志片段（记得先删掉 Cookie / SESSDATA 等敏感信息）
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: 环境
+      placeholder: Windows 11 / Python 3.12 / Node 20
+    validations:
+      required: false

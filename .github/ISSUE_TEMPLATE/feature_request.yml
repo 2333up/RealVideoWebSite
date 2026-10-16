@@ -1,0 +1,42 @@
+name: 功能建议
+description: 提出新功能或改进点
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决什么问题
+      description: 先说痛点，再说方案。只写方案的需求容易被否。
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: 设想的方案
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: 涉及范围
+      multiple: true
+      options:
+        - 后端
+        - 前端
+        - 新平台接入
+        - 排序 / 推荐
+        - 文档
+        - 工程 / CI
+    validations:
+      required: true
+
+  - type: textarea
+    id: risk
+    attributes:
+      label: 可能的风险
+      description: 例如是否会影响平台原生排序、是否触碰账号凭据、是否会触发平台风控
+    validations:
+      required: false
