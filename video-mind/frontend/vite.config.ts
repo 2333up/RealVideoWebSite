@@ -13,14 +13,18 @@ export default defineConfig({
     strictPort: true,
     host: '127.0.0.1',
     proxy: {
-      // 后端跑在 8600，开发态由 Vite 转发，避免 CORS 与跨域 Cookie 问题
+      // 后端已与 lingoSeek 合并为单一服务，统一跑在 8000。
+      // video-mind 的接口整体挂在 /videomind 前缀下，这里把 /api、/artifacts
+      // 转发到 8000 并补上 /videomind 前缀，前端业务代码无需任何改动。
       '/api': {
-        target: 'http://127.0.0.1:8600',
+        target: 'http://127.0.0.1:8000',
         changeOrigin: true,
+        rewrite: (path) => '/videomind' + path,
       },
       '/artifacts': {
-        target: 'http://127.0.0.1:8600',
+        target: 'http://127.0.0.1:8000',
         changeOrigin: true,
+        rewrite: (path) => '/videomind' + path,
       },
     },
   },

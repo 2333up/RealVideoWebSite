@@ -35,6 +35,9 @@ const KIND_OPTIONS: { key: ContentKind; label: string }[] = [
   { key: 'article', label: '图文' },
 ]
 
+// video-mind 前端开发地址；部署时可用 VITE_VIDEOMIND_URL 覆盖
+const VIDEOMIND_URL = import.meta.env.VITE_VIDEOMIND_URL ?? 'http://127.0.0.1:5273'
+
 /** 卡片固定 250×210，由 auto-fill 决定每行列数，随浏览器宽度自适应 */
 const CARD_W = 250
 const GRID_GAP = 16
@@ -281,6 +284,18 @@ export default function App() {
                 )}
               </button>
             </form>
+
+            {/* 跳转 video-mind：独立的本地视频分析界面，开新标签页避免丢失当前搜索结果 */}
+            <button
+              type="button"
+              onClick={() => window.open(VIDEOMIND_URL, '_blank', 'noopener,noreferrer')}
+              className="flex shrink-0 items-center gap-1.5 rounded-lg border border-ink-100 bg-white py-1 pl-2 pr-2.5
+                         text-xs font-medium text-ink-700 transition-colors hover:border-ink-300"
+              title="打开 Video-Mind · 本地视频分章节与思维导图"
+            >
+              <span aria-hidden>🎬</span>
+              <span className="hidden md:block">Video-Mind</span>
+            </button>
 
             {/* 账号入口（精简高度） */}
             <button
