@@ -62,22 +62,24 @@ RealVideoWebSite/
 │   ├── app/platforms/      平台适配器：bilibili / douyin / xiaohongshu
 │   ├── app/routers/        embed（服务端代理嵌入）· download
 │   └── app/services/       account_service（Cookie 加密存储）
-├── frontend/               灵搜 · React + Vite（端口 5173）
+├── frontend/               统一前端：灵搜 + video-mind 两条路由（端口 5173）
+│   ├── src/App.tsx         路由分发：/ → 灵搜，/videomind/* → video-mind
+│   └── src/videomind/      video-mind 全部源码（原 video-mind/frontend/src）
 └── video-mind/             另一个独立产品：本地视频 → 章节 → 时间戳思维导图
-    ├── backend/            FastAPI + SQLAlchemy + SQLite（端口 8600）
+    ├── backend/            FastAPI + SQLAlchemy + SQLite（由主后端挂载到 /videomind）
     │   ├── core/           config / models / database / files_dialog / compat
     │   ├── providers/      asr（faster-whisper / 云端）· llm（DeepSeek 等）
     │   ├── pipeline/       media / chapter / mindmap / runner
     │   └── routers/        videos / folders / files / jobs / settings / usage
-    └── frontend/           React 18 + TS + Vite + Tailwind + ReactFlow（端口 5273）
+    └── data/               本地运行数据（数据库、上传、产物，不入库）
 ```
 
-**端口分配（绝不能共用，踩过事故）：**
+**服务拓扑（合并后，全仓只有一个前端服务 + 一个后端服务）：**
 
-| 产品 | 后端 | 前端 |
+| 服务 | 地址 | 说明 |
 |---|---|---|
-| 灵搜 LingoSeek | 8000 | 5173 |
-| video-mind | 8600 | 5273 |
+| 前端（唯一） | http://127.0.0.1:5173 | 灵搜与 video-mind 同一个 dev server，靠前端路由分发 |
+| 后端（唯一） | http://127.0.0.1:8000 | 主应用 + 挂载在 `/videomind` 的 video-mind 子应用 |
 
 前端一律配 `strictPort: true` + `host: 127.0.0.1`，端口被占要**直接报错**，不允许静默漂移。
 启动服务前先 `netstat -ano | grep :端口` 确认没有残留进程。
@@ -89,8 +91,8 @@ RealVideoWebSite/
 | Agent | 负责 | 禁止触碰 |
 |---|---|---|
 | 主 Agent（当前会话的编排者） | 全仓；**唯一可 push `master` 的角色**（不论使用者是谁）；负责 PR review 与合并 | — |
-| 子 Agent · 后端 | `backend/`、`video-mind/backend/` | `frontend/`、`video-mind/frontend/` |
-| 子 Agent · 前端 | `frontend/`、`video-mind/frontend/src/` | `backend/`、`video-mind/backend/` |
+| 子 Agent · 后端 | `backend/`、`video-mind/backend/` | `frontend/` |
+| 子 Agent · 前端 | `frontend/`（含 `src/videomind/`） | `backend/`、`video-mind/backend/` |
 | 子 Agent · 调研/文档 | 只读探索、README、调研报告 | 不得直接改业务代码 |
 
 跨边界的改动（例如同时改后端接口和前端调用）**必须拆成多次提交**，并在 PR 描述里说明依赖关系。
@@ -147,7 +149,12 @@ git diff --cached --name-only | grep -Ei "(\.env$|\.env\.|secret|key|\.db$|data/
 
 ```bash
 cd video-mind/backend && ./.venv/Scripts/python.exe -m pytest tests -q   # 全绿
-cd video-mind/frontend && npx tsc --noEmit && npm run build               # 无报错
+```
+
+**前端（合并后的统一工程，覆盖两个产品）：**
+
+```bash
+cd frontend && npx tsc --noEmit && npm run build               # 无报错
 ```
 
 **灵搜 LingoSeek：** 改到哪个平台就实跑一次对应搜索/详情接口，确认没被风控误判为「功能坏了」。

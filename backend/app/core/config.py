@@ -30,12 +30,11 @@ class Settings(BaseSettings):
     DATABASE_URL: str = f"sqlite:///{DATA_DIR / 'app.db'}"
 
     # 允许的前端来源（Vite 开发服务器）
-    # 5173 = lingoSeek 前端；5273 = video-mind 前端（合并后端后两者都对接 8000）
+    # 前端已合并为单一工程：灵搜与 video-mind 同跑 5173，video-mind 的 API
+    # 经 /videomind 子路径由同一个源发出，不需要单独的跨域来源。
     CORS_ORIGINS: list[str] = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-        "http://localhost:5273",
-        "http://127.0.0.1:5273",
         "http://localhost:4173",
         "http://127.0.0.1:4173",
     ]

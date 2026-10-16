@@ -66,8 +66,11 @@ uvicorn main:app --reload --port 8000
 ```bash
 cd frontend
 npm install
-npm run dev        # http://127.0.0.1:5173，已代理 /api → 8000
+npm run dev        # http://127.0.0.1:5173，已代理 /api 与 /videomind/api → 8000
 ```
+
+前端是统一工程：`/` 是灵搜，`/videomind/*` 是 video-mind（源码在 `frontend/src/videomind/`），
+两个产品共用这一个 dev server，不要再单独起第二个前端。
 
 ### 首次克隆后必做
 
