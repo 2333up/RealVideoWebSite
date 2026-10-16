@@ -3,6 +3,9 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
+  // 统一服务：默认挂在 lingoSeek 前端的 /videomind 子路径下。
+  // 直接跑本项目时用 `npm run dev:standalone`（base 设为 /）。
+  base: process.env.VM_BASE_PATH ?? '/videomind/',
   server: {
     // 端口必须与「灵搜 LingoSeek」错开：两个项目共用本仓库，
     // 都用 5173 的话，后启动的 vite 会被挤到 IPv6([::1]:5173) 且不报错，

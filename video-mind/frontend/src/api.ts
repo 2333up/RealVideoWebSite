@@ -16,7 +16,14 @@ import type {
   VideoSummary,
 } from './types'
 
-const BASE = '/api'
+// 统一服务后，video-mind 挂在 lingoSeek 前端的 /videomind 子路径下，
+// 经其 vite 代理转发到同一个 8000 后端。
+// BASE 必须在**子路径里**用（相对路径基准是当前文档 URL）：
+//   - 走 /videomind/ 时 → /videomind/api，由 lingoSeek 的代理去掉前缀后补上
+//   - 单独跑 5273（根路径）时 → /api，由 video-mind 自己的代理补上
+// 写成绝对路径会让子路径部署下的请求打到 lingoSeek 的 /api 上，表现为
+// 「所有接口 404，但页面能打开」。
+const BASE = import.meta.env.BASE_URL === '/' ? '/api' : `${import.meta.env.BASE_URL}api`
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(BASE + path, {

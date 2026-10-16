@@ -54,8 +54,13 @@ const FOLLOWER_OPTIONS: { label: string; value: number | null }[] = [
   { label: '≥100万粉', value: 1_000_000 },
 ]
 
-// video-mind 前端开发地址；部署时可用 VITE_VIDEOMIND_URL 覆盖
-const VIDEOMIND_URL = import.meta.env.VITE_VIDEOMIND_URL ?? 'http://127.0.0.1:5273'
+// video-mind 入口。统一服务后与 lingoSeek 同源（前端 5173 / 后端 8000），
+// 由 vite 代理把 /videomind 转发到 video-mind 自己的 dev server，
+// 用户只需记一个地址。部署时可用 VITE_VIDEOMIND_URL 覆盖。
+const VIDEOMIND_URL = import.meta.env.VITE_VIDEOMIND_URL ?? '/videomind/'
+// 探测用：video-mind 的 index.html。不能用 lingoSeek 自己的静态资源，
+// 那样探测的其实是当前页面，永远「可达」，等于没探测。
+const VIDEOMIND_PROBE_URL = import.meta.env.VITE_VIDEOMIND_PROBE_URL ?? '/videomind/'
 
 /** 卡片固定 250×210，由 auto-fill 决定每行列数，随浏览器宽度自适应 */
 const CARD_W = 250
@@ -256,35 +261,35 @@ export default function App() {
   )
 
   /**
-   * 探测 video-mind 是否可达，不可达时给出提示。
+   * 探测 video-mind 前端是否可达，不可达时给出提示。
    *
-   * mode: 'no-cors' 是这里的关键：跨域请求会被浏览器屏蔽响应体，但**连接失败
-   * 依然会 reject、连上了依然会 resolve**（只是拿到 opaque response）。
-   * 于是无需 CORS 配合就能判断「那个端口有没有服务在听」。
+   * 现在是同源路径（同走 5173），可以直接读 HTTP 状态码判断，比原来那套
+   * 「no-cors + 连接失败推断」可靠得多：no-cors 下永远拿不到状态码，
+   * 502 与 404 都会被当成「可达」。
    *
    * 注意这里**只设置提示，不负责跳转**：跳转交给 <a target="_blank"> 完成。
    * 若在此处 await 之后再 window.open，弹窗会被浏览器拦截。
    */
   const probeVideoMind = async () => {
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 2500)
-    let reachable = false
+    const timer = setTimeout(() => controller.abort(), 4000)
+    let ok = false
     try {
-      await fetch(VIDEOMIND_URL, {
-        mode: 'no-cors',
+      const resp = await fetch(VIDEOMIND_PROBE_URL, {
         cache: 'no-store',
         signal: controller.signal,
       })
-      reachable = true
+      ok = resp.ok
     } catch {
-      reachable = false
+      ok = false
     } finally {
       clearTimeout(timer)
     }
     setVmHint(
-      reachable
+      ok
         ? ''
-        : `Video-Mind 未响应（${VIDEOMIND_URL}）。请先启动它：cd video-mind/frontend && npm run dev`,
+        : 'Video-Mind 未响应。请先启动它：cd video-mind/frontend && npm run dev' +
+            '（统一入口经 /videomind 转发）',
     )
   }
 
