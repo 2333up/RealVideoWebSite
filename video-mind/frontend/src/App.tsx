@@ -202,10 +202,10 @@ export default function App() {
 
   // ---------------------------------------------------------------- 分类文件夹
 
-  const createFolder = async (name: string) => {
+  const createFolder = async (name: string, parentId: number | null = null) => {
     setError('')
     try {
-      await api.createFolder(name)
+      await api.createFolder(name, parentId)
       await refresh()
     } catch (e) {
       setError(String((e as Error).message || e))

@@ -5,6 +5,8 @@ interface Props {
   video: VideoSummary
   selected: boolean
   folders: Folder[]
+  /** 分类的完整路径（「课程/进阶」），多级下同名分类靠它区分 */
+  folderPaths: Record<number, string>
   onSelect: (id: number) => void
   onAnalyze: (id: number, force: boolean) => void
   onMove: (videoId: number, folderId: number | null) => void
@@ -20,6 +22,7 @@ export default function VideoRow({
   video: v,
   selected,
   folders,
+  folderPaths,
   onSelect,
   onAnalyze,
   onMove,
@@ -75,7 +78,7 @@ export default function VideoRow({
             <option value="">未分类</option>
             {folders.map((f) => (
               <option key={f.id} value={f.id}>
-                {f.name}
+                {folderPaths[f.id] ?? f.name}
               </option>
             ))}
           </select>
