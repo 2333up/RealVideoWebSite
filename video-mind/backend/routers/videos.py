@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import re
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -72,7 +73,38 @@ def video_to_dict(v: Video, with_detail: bool = False) -> dict:
         data["mindmap"] = (
             mindmap_ops.ensure_node_ids(v.mindmap.tree) if v.mindmap else None
         )
+        data["last_job"] = job_to_dict(v.jobs[-1] if v.jobs else None)
     return data
+
+
+def job_to_dict(job) -> dict | None:
+    """最近一次分析任务。
+
+    elapsed_seconds 由服务端算好而不是前端自己掐表：
+    前端掐表的起点只能是「页面发现它开始处理」，用户中途切走视频或刷新页面
+    就断了；而且排队等待的时间不该算进来，只有后端知道真正的起跑时刻。
+    """
+    if job is None:
+        return None
+    # started_at 是后加的列，老任务为 NULL。此时退回 created_at：
+    # 它包含了「排队等上一个任务」的时间，会略微偏大，但总好过什么都不显示。
+    started = job.started_at or job.created_at
+    finished = job.finished_at
+    elapsed = None
+    if started is not None:
+        end = finished or datetime.now()
+        elapsed = round((end - started).total_seconds(), 1)
+    return {
+        "id": job.id,
+        "stage": job.stage,
+        "progress": job.progress,
+        "message": job.message,
+        "error": job.error,
+        "started_at": started.isoformat() if started else None,
+        "finished_at": finished.isoformat() if finished else None,
+        "elapsed_seconds": elapsed,
+        "running": job.stage not in ("done", "failed"),
+    }
 
 
 # ------------------------------------------------------------------ 列表 / 详情

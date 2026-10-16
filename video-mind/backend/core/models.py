@@ -96,8 +96,10 @@ class Video(Base):
     mindmap: Mapped["MindMap | None"] = relationship(
         back_populates="video", uselist=False, cascade="all, delete-orphan"
     )
+    # order_by 必须显式写：不写的话 SQLAlchemy 不保证返回顺序，
+    # 而「最近一次任务」是靠 v.jobs[-1] 取的，顺序错了会拿到错误的耗时
     jobs: Mapped[list["Job"]] = relationship(
-        back_populates="video", cascade="all, delete-orphan"
+        back_populates="video", cascade="all, delete-orphan", order_by="Job.id"
     )
     folder: Mapped["Folder | None"] = relationship(back_populates="videos")
 
@@ -195,5 +197,10 @@ class Job(Base):
     cancel_requested: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+    # 真实起止时间：updated_at 会被进度的每次回写刷新，拿它当「结束时间」
+    # 会得到一个不断往前跑的错误数字。只有这两个字段是给用户看耗时用的。
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
 
     video: Mapped["Video"] = relationship(back_populates="jobs")

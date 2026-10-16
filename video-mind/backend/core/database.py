@@ -42,6 +42,7 @@ _EXTRA_COLUMNS: dict[str, list[tuple[str, str]]] = {
     "videos": [("folder_id", "INTEGER")],
     "chapters": [("source_node_id", "VARCHAR(64)")],
     "folders": [("parent_id", "INTEGER")],
+    "jobs": [("started_at", "DATETIME"), ("finished_at", "DATETIME")],
 }
 
 
