@@ -2,6 +2,9 @@
 
 > 本文件是本仓库的**最高行动准则**。任何 Agent（含子 Agent、后台 Agent）在开始任何
 > 代码工作之前，必须先读完本文件并严格遵守。有冲突时以本文件为准。
+>
+> 本仓库**有多个使用者**都会通过 WorkBuddy 开发和维护它。因此下面所有权限规则
+> 都是**按「角色」划分，而不是按「人」划分**——换谁坐在键盘前，规则都一样。
 
 ---
 
@@ -14,20 +17,38 @@
 | 主干分支 | `master` |
 | 默认远端 | `origin` |
 
-**推送权限（不可协商的红线）：**
+### 角色定义
 
-- **只有主 Agent（WorkBuddy，即当前会话的主智能体）可以 push 到主干 `master`。**
-- **其他任何 Agent（子 Agent、并行 Agent、后台 Agent）一律禁止 push `master`**，
-  也不得对 `master` 做 force push、rebase 后强推、删除远端分支等操作。
+| 角色 | 是谁 | 推送权限 |
+|---|---|---|
+| **主 Agent** | 任一会话中负责任务编排、直接与使用者对话的那个 WorkBuddy 主智能体。**它是一个角色，不是某个固定的人**——任何使用者启动的会话里，那个主智能体就是主 Agent | ✅ 唯一可以 push `master` |
+| **其他 Agent** | 主 Agent 派生出的子 Agent、并行 Agent、后台 Agent，以及任何非编排角色的智能体 | ❌ 禁止 push `master`，只能推分支 |
+
+### 推送权限（不可协商的红线）
+
+- **只有主 Agent 可以 push 到主干 `master`**（不论这次会话的使用者是谁）。
+- **其他任何 Agent 一律禁止 push `master`**，也不得对 `master` 做 force push、
+  rebase 后强推、删除远端分支等操作。
 - 其他 Agent 只能：`git checkout -b feature/<简述>` → 提交 → `git push -u origin <分支名>`
   → **创建 PR**，由主 Agent review 后合并进 `master`。
 
-其它共同约束：
+### 多使用者带来的额外要求
+
+正因为不止一个人在用，下面这几条比单人项目更要紧：
+
+- **push 前先同步**：`git fetch origin && git pull --rebase origin master`，
+  避免各自本地历史分叉后互相覆盖。
+- **推送后立刻核对**：`git log --oneline -1` 与 `git ls-remote --heads origin` 比对，
+  确认远端 HEAD 与本地一致。
+- **先沟通再动主干**：若发现远端已有别人（或别的会话）新推的提交而自己本地落后，
+  先对齐，不要抢推。
+- **不得提交密钥**：`.env`、`.secret_key`、`*.db`、模型文件等一律不得入库（见第 5 节）。
+- 涉及删除用户文件、发邮件、公开发布等**外部动作，必须先征求使用者同意**。
+
+### 其它共同约束
 
 - **禁止 `--force` / `--no-verify`**：不做强制推送，不跳过钩子。
 - **禁止改写已推送的历史**（rebase/reset --hard 后强推）。
-- **不得提交密钥**：`.env`、`.secret_key`、`*.db`、模型文件等一律不得入库（见第 5 节）。
-- 涉及删除用户文件、发邮件、公开发布等**外部动作，必须先征求用户同意**。
 
 ---
 
@@ -67,7 +88,7 @@ RealVideoWebSite/
 
 | Agent | 负责 | 禁止触碰 |
 |---|---|---|
-| 主 Agent（WorkBuddy） | 全仓；**唯一可 push `master` 的角色**；负责 PR review 与合并 | — |
+| 主 Agent（当前会话的编排者） | 全仓；**唯一可 push `master` 的角色**（不论使用者是谁）；负责 PR review 与合并 | — |
 | 子 Agent · 后端 | `backend/`、`video-mind/backend/` | `frontend/`、`video-mind/frontend/` |
 | 子 Agent · 前端 | `frontend/`、`video-mind/frontend/src/` | `backend/`、`video-mind/backend/` |
 | 子 Agent · 调研/文档 | 只读探索、README、调研报告 | 不得直接改业务代码 |
