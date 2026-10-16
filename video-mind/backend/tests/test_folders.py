@@ -23,7 +23,7 @@ from core.database import Base  # noqa: E402
 from core.models import Folder, Video  # noqa: E402
 from routers import folders as folders_mod  # noqa: E402
 from routers import videos as videos_mod  # noqa: E402
-from routers.folders import normalize_name  # noqa: E402
+from routers.folders import FolderCreate, FolderPatch, normalize_name  # noqa: E402
 
 
 @pytest.fixture()
@@ -71,28 +71,28 @@ def test_超长名称报错():
 # ------------------------------------------------------------------ CRUD
 
 def test_新建文件夹(db):
-    f = folders_mod.create_folder(type("R", (), {"name": "机器学习"}), db)
+    f = folders_mod.create_folder(FolderCreate(name="机器学习"), db)
     assert f["id"] > 0
     assert f["name"] == "机器学习"
     assert f["video_count"] == 0
 
 
 def test_同名文件夹被拒绝(db):
-    folders_mod.create_folder(type("R", (), {"name": "机器学习"}), db)
+    folders_mod.create_folder(FolderCreate(name="机器学习"), db)
     with pytest.raises(HTTPException) as e:
-        folders_mod.create_folder(type("R", (), {"name": " 机器学习 "}), db)
+        folders_mod.create_folder(FolderCreate(name=" 机器学习 "), db)
     assert "同名" in str(e.value.detail)
 
 
 def test_重命名到已存在名字被拒绝(db):
-    a = folders_mod.create_folder(type("R", (), {"name": "A"}), db)
-    folders_mod.create_folder(type("R", (), {"name": "B"}), db)
+    a = folders_mod.create_folder(FolderCreate(name="A"), db)
+    folders_mod.create_folder(FolderCreate(name="B"), db)
     with pytest.raises(HTTPException):
-        folders_mod.rename_folder(a["id"], type("R", (), {"name": "B"}), db)
+        folders_mod.rename_folder(a["id"], FolderPatch(name="B"), db)
 
 
 def test_删除文件夹_视频退回未分类而不是被删掉(db):
-    f = folders_mod.create_folder(type("R", (), {"name": "课程"}), db)
+    f = folders_mod.create_folder(FolderCreate(name="课程"), db)
     v = Video(title="v", filename="v.mp4", path="/x/v.mp4", folder_id=f["id"])
     db.add(v)
     db.commit()
@@ -107,7 +107,7 @@ def test_删除文件夹_视频退回未分类而不是被删掉(db):
 
 
 def test_列表带视频计数(db):
-    f = folders_mod.create_folder(type("R", (), {"name": "课程"}), db)
+    f = folders_mod.create_folder(FolderCreate(name="课程"), db)
     db.add(Video(title="a", path="/a.mp4", folder_id=f["id"]))
     db.add(Video(title="b", path="/b.mp4", folder_id=f["id"]))
     db.add(Video(title="c", path="/c.mp4"))
@@ -117,10 +117,69 @@ def test_列表带视频计数(db):
     assert items[0]["video_count"] == 2
 
 
+# ------------------------------------------------------------------ 多级目录
+
+def test_创建子文件夹(db):
+    p = folders_mod.create_folder(FolderCreate(name="课程"), db)
+    c = folders_mod.create_folder(FolderCreate(name="进阶", parent_id=p["id"]), db)
+    assert c["parent_id"] == p["id"]
+    assert folders_mod.create_folder(FolderCreate(name="根目录"), db)["parent_id"] is None
+
+
+def test_不同父级下允许同名(db):
+    """「课程/进阶」与「项目/进阶」必须共存——全表唯一会误伤这种合理结构。"""
+    a = folders_mod.create_folder(FolderCreate(name="课程"), db)
+    b = folders_mod.create_folder(FolderCreate(name="项目"), db)
+    x = folders_mod.create_folder(FolderCreate(name="进阶", parent_id=a["id"]), db)
+    y = folders_mod.create_folder(FolderCreate(name="进阶", parent_id=b["id"]), db)
+    assert x["id"] != y["id"]
+    assert (x["parent_id"], y["parent_id"]) == (a["id"], b["id"])
+
+
+def test_同一父级下同名被拒绝(db):
+    p = folders_mod.create_folder(FolderCreate(name="课程"), db)
+    folders_mod.create_folder(FolderCreate(name="进阶", parent_id=p["id"]), db)
+    with pytest.raises(HTTPException) as e:
+        folders_mod.create_folder(FolderCreate(name=" 进阶 ", parent_id=p["id"]), db)
+    assert "同一层级" in str(e.value.detail)
+
+
+def test_父文件夹不存在报404(db):
+    with pytest.raises(HTTPException) as e:
+        folders_mod.create_folder(FolderCreate(name="孤儿", parent_id=999), db)
+    assert e.value.status_code == 404
+
+
+def test_列表带parent_id(db):
+    p = folders_mod.create_folder(FolderCreate(name="课程"), db)
+    folders_mod.create_folder(FolderCreate(name="进阶", parent_id=p["id"]), db)
+    items = {i["name"]: i for i in folders_mod.list_folders(db)["items"]}
+    assert items["课程"]["parent_id"] is None
+    assert items["进阶"]["parent_id"] == p["id"]
+
+
+def test_删除父文件夹_子文件夹提升一层而不是被删掉(db):
+    p = folders_mod.create_folder(FolderCreate(name="课程"), db)
+    c = folders_mod.create_folder(FolderCreate(name="进阶", parent_id=p["id"]), db)
+    g = folders_mod.create_folder(FolderCreate(name="第01章", parent_id=c["id"]), db)
+    v = Video(title="v", path="/v.mp4", folder_id=g["id"])
+    db.add(v)
+    db.commit()
+
+    r = folders_mod.delete_folder(p["id"], db)
+    assert r["promoted"] == 1  # 只有「进阶」是它的直接子级
+
+    db.expire_all()
+    assert db.get(Folder, c["id"]).parent_id is None, "子文件夹应提升到根级，而不是跟着消失"
+    assert db.get(Folder, g["id"]).parent_id == c["id"], "孙级归属不受影响"
+    assert db.query(Video).count() == 1, "删分类绝不能删掉视频"
+    assert db.get(Video, v.id).folder_id == g["id"]
+
+
 # ------------------------------------------------------------------ 移动
 
 def test_批量移动进文件夹(db):
-    f = folders_mod.create_folder(type("R", (), {"name": "课程"}), db)
+    f = folders_mod.create_folder(FolderCreate(name="课程"), db)
     v1 = Video(title="a", path="/a.mp4")
     v2 = Video(title="b", path="/b.mp4")
     db.add_all([v1, v2])
@@ -134,7 +193,7 @@ def test_批量移动进文件夹(db):
 
 
 def test_移回未分类(db):
-    f = folders_mod.create_folder(type("R", (), {"name": "课程"}), db)
+    f = folders_mod.create_folder(FolderCreate(name="课程"), db)
     v = Video(title="a", path="/a.mp4", folder_id=f["id"])
     db.add(v)
     db.commit()
@@ -158,7 +217,7 @@ def test_移动到不存在的文件夹报404(db):
 
 
 def test_部分视频不存在时不整体失败(db):
-    f = folders_mod.create_folder(type("R", (), {"name": "课程"}), db)
+    f = folders_mod.create_folder(FolderCreate(name="课程"), db)
     v = Video(title="a", path="/a.mp4")
     db.add(v)
     db.commit()

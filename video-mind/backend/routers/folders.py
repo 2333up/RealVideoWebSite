@@ -19,6 +19,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from core.database import get_db
@@ -53,9 +54,35 @@ def folder_to_dict(f: Folder, video_count: int | None = None) -> dict:
     return {
         "id": f.id,
         "name": f.name,
+        #: 前端靠它把平铺列表还原成树；None = 根级
+        "parent_id": f.parent_id,
         "video_count": len(f.videos) if video_count is None else video_count,
         "created_at": f.created_at.isoformat() if f.created_at else None,
     }
+
+
+def _load_parent(db: Session, parent_id: int | None) -> Folder | None:
+    """校验父分类存在。None 表示建在根级，不用查。"""
+    if parent_id is None:
+        return None
+    parent = db.get(Folder, parent_id)
+    if not parent:
+        raise HTTPException(404, f"父文件夹不存在（id={parent_id}）")
+    return parent
+
+
+def _has_same_name(
+    db: Session, name: str, parent_id: int | None, exclude_id: int | None = None
+) -> bool:
+    """同一层级下是否已有同名分类。
+
+    只在同一父级内查：多级目录里「课程/进阶」和「项目/进阶」应当共存，
+    全表唯一会把这种合理结构误判成重名。
+    """
+    q = db.query(Folder).filter(Folder.name == name, Folder.parent_id == parent_id)
+    if exclude_id is not None:
+        q = q.filter(Folder.id != exclude_id)
+    return q.first() is not None
 
 
 def get_or_create_folder(db: Session, name: str) -> Folder:
@@ -95,16 +122,25 @@ def list_folders(db: Session = Depends(get_db)):
 
 class FolderCreate(BaseModel):
     name: str
+    #: 父分类 id；None（默认）= 建在根级
+    parent_id: int | None = None
 
 
 @router.post("")
 def create_folder(body: FolderCreate, db: Session = Depends(get_db)):
     clean = normalize_name(body.name)
-    if db.query(Folder).filter(Folder.name == clean).one_or_none():
-        raise HTTPException(400, f"已经有同名文件夹「{clean}」")
-    f = Folder(name=clean)
+    _load_parent(db, body.parent_id)
+    if _has_same_name(db, clean, body.parent_id):
+        raise HTTPException(400, f"同一层级下已经有同名文件夹「{clean}」")
+    f = Folder(name=clean, parent_id=body.parent_id)
     db.add(f)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # 老库在 name 上还留着全局唯一约束，跨层级同名会撞在这里；
+        # 统一翻译成用户能看懂的 400，而不是抛一个 500
+        db.rollback()
+        raise HTTPException(400, f"已经有同名文件夹「{clean}」")
     db.refresh(f)
     return folder_to_dict(f, 0)
 
@@ -119,27 +155,51 @@ def rename_folder(folder_id: int, body: FolderPatch, db: Session = Depends(get_d
     if not f:
         raise HTTPException(404, "文件夹不存在")
     clean = normalize_name(body.name)
-    clash = db.query(Folder).filter(Folder.name == clean, Folder.id != folder_id).one_or_none()
-    if clash:
-        raise HTTPException(400, f"已经有同名文件夹「{clean}」")
+    if _has_same_name(db, clean, f.parent_id, exclude_id=folder_id):
+        raise HTTPException(400, f"同一层级下已经有同名文件夹「{clean}」")
     f.name = clean
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(400, f"已经有同名文件夹「{clean}」")
     db.refresh(f)
     return folder_to_dict(f)
 
 
 @router.delete("/{folder_id}")
 def delete_folder(folder_id: int, db: Session = Depends(get_db)):
-    """删除文件夹；里面的视频退回未分类，分析结果保持不变。"""
+    """删除文件夹：视频退回未分类，子文件夹提升一层，分析结果保持不变。
+
+    两个必须遵守的语义：
+      - 子文件夹不是「文件夹的内容」，而是同级的组织单元，删父级时应当**提升**
+        到祖父级下，而不是跟着消失——那里面同样挂着用户的视频和分析结果。
+      - 视频退回未分类，绝不删除（见模块顶部说明）。
+
+    这里全部走 bulk update/delete 而不是改 ORM 对象：SQLAlchemy 在删除父行时会
+    把已加载的 children 的外键置 NULL，那会把「提升一层」覆盖成「掉到根级」。
+    """
     f = db.get(Folder, folder_id)
     if not f:
         raise HTTPException(404, "文件夹不存在")
-    moved = db.query(Video).filter(Video.folder_id == folder_id).count()
-    db.query(Video).filter(Video.folder_id == folder_id).update({Video.folder_id: None})
+
+    grandparent_id = f.parent_id
+    promoted = (
+        db.query(Folder)
+        .filter(Folder.parent_id == folder_id)
+        .update({Folder.parent_id: grandparent_id}, synchronize_session=False)
+    )
+    moved = (
+        db.query(Video)
+        .filter(Video.folder_id == folder_id)
+        .update({Video.folder_id: None}, synchronize_session=False)
+    )
     name = f.name
-    db.delete(f)
     db.commit()
-    return {"ok": True, "name": name, "unfiled": moved}
+    # 先落盘再删父行：顺序反了的话子文件夹刚提升上去就又被置空
+    db.query(Folder).filter(Folder.id == folder_id).delete(synchronize_session=False)
+    db.commit()
+    return {"ok": True, "name": name, "unfiled": moved, "promoted": promoted}
 
 
 # ------------------------------------------------------------------ 移动视频

@@ -41,6 +41,7 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, futu
 _EXTRA_COLUMNS: dict[str, list[tuple[str, str]]] = {
     "videos": [("folder_id", "INTEGER")],
     "chapters": [("source_node_id", "VARCHAR(64)")],
+    "folders": [("parent_id", "INTEGER")],
 }
 
 
@@ -66,13 +67,47 @@ def _add_missing_columns() -> int:
     return added
 
 
+def _drop_folders_name_unique() -> bool:
+    """去掉老库在 folders.name 上的全局唯一索引。
+
+    多级分类下「课程/进阶」和「项目/进阶」必须能共存，全局唯一会把这种合理
+    结构判成重名。SQLite 改不了约束本身，但列级 unique=True 生成的是一个独立
+    的 CREATE UNIQUE INDEX，直接删掉再补一个普通索引即可——表结构、数据、
+    外键全都不用动，比重建表安全得多。
+    """
+    insp = inspect(engine)
+    if "folders" not in insp.get_table_names():
+        return False
+
+    target: str | None = None
+    for idx in insp.get_indexes("folders"):
+        cols = [c for c in (idx.get("column_names") or []) if c]
+        if idx.get("unique") and cols == ["name"]:
+            target = idx["name"]
+            break
+    if not target:
+        return False
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(f'DROP INDEX IF EXISTS "{target}"'))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_folders_name ON folders (name)"))
+    except Exception:  # noqa: BLE001
+        # 表级 UNIQUE 约束对应的是 sqlite_autoindex，删不掉；那种库保持原样即可，
+        # 只是跨层级同名会被拒，其余功能不受影响
+        return False
+
+    insp.clear_cache()
+    return True
+
+
 def init_db() -> None:
     from . import models  # noqa: F401  注册所有表
 
     Base.metadata.create_all(engine)
-    if _add_missing_columns():
-        # 只记日志失败勘查用：补列是幂等的，成功与否都不该阻塞启动
-        pass
+    # 补列是幂等的，成功与否都不该阻塞启动
+    _add_missing_columns()
+    _drop_folders_name_unique()
 
 
 def get_db():
