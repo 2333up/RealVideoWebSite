@@ -134,6 +134,23 @@ export default function VideoPlayer({ video, playerRef, seekRequest, onTimeUpdat
             {failed}
           </div>
         )}
+
+        {/* 中央点击层：点击视频画面任意位置（含正中）即可切换播放/暂停。
+            仅在视频就绪且未失败时显示，避免遮挡「加载中 / 失败」提示。 */}
+        {ready && !failed && (
+          <button
+            type="button"
+            onClick={togglePlay}
+            aria-label={isPlaying ? '暂停' : '播放'}
+            className="absolute inset-0 flex cursor-pointer items-center justify-center bg-transparent"
+          >
+            {!isPlaying && (
+              <span className="flex h-16 w-16 items-center justify-center rounded-full bg-black/55 text-3xl text-white shadow-lg transition-transform hover:scale-105">
+                ▶
+              </span>
+            )}
+          </button>
+        )}
       </div>
 
       <div className="bg-gray-900 text-gray-200 px-3 py-2 space-y-2">
