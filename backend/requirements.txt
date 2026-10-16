@@ -1,7 +1,7 @@
 # 灵搜 LingoSeek · 后端依赖
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
-httpx>=0.28.0
+httpx>=0.28.1
 sqlalchemy>=2.0.36
 alembic>=1.14.0
 pydantic>=2.9.0
