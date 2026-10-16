@@ -17,16 +17,15 @@ import SettingsPanel from './components/SettingsPanel'
 import UsagePanel from './components/UsagePanel'
 import ImportPanel from './components/ImportPanel'
 import FolderList from './components/FolderList'
-import VideoList from './components/VideoList'
 import PanelResizer from './components/PanelResizer'
 import PanelRail from './components/PanelRail'
 import { makeSeekRequest, type SeekRequest } from './lib/seekRequest'
 
 export default function App() {
+  // videos 始终是全量：分类树按 folder_id 就地分组渲染，不再按当前分类
+  // 另向后端要一份过滤结果——否则每切一次分类都要重新请求，且展开别的分类时
+  // 手里根本没有那份数据。
   const [videos, setVideos] = useState<VideoSummary[]>([])
-  // 全量列表单独存一份：侧栏要显示「全部 / 未分类」的真实计数，
-  // 而 videos 是当前分类过滤后的结果，两者不是一回事。
-  const [allVideos, setAllVideos] = useState<VideoSummary[]>([])
   const [folders, setFolders] = useState<Folder[]>([])
   const [activeFolder, setActiveFolder] = useState('')
   const [pickerInfo, setPickerInfo] = useState<PickerInfo | null>(null)
@@ -58,18 +57,13 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [all, folders, scoped] = await Promise.all([
-        api.listVideos(),
-        api.listFolders(),
-        activeFolder ? api.listVideos(activeFolder) : Promise.resolve(null),
-      ])
-      setAllVideos(all.items)
+      const [all, folders] = await Promise.all([api.listVideos(), api.listFolders()])
+      setVideos(all.items)
       setFolders(folders.items)
-      setVideos(scoped ? scoped.items : all.items)
     } catch (e) {
       setError(String((e as Error).message || e))
     }
-  }, [activeFolder])
+  }, [])
 
   useEffect(() => {
     refresh()
@@ -96,7 +90,7 @@ export default function App() {
   const pollJob = useCallback(async () => {
     if (!selectedId) return
     try {
-      const r = await api.listVideos(activeFolder || undefined)
+      const r = await api.listVideos()
       setVideos(r.items)
       const v = r.items.find((x) => x.id === selectedId)
       if (!v) return
@@ -113,7 +107,7 @@ export default function App() {
     } catch (e) {
       setError(String((e as Error).message || e))
     }
-  }, [selectedId, activeFolder])
+  }, [selectedId])
 
   useEffect(() => {
     if (detail?.status !== 'processing') return
@@ -381,21 +375,17 @@ export default function App() {
 
               <FolderList
                 folders={folders}
+                videos={videos}
                 active={activeFolder}
-                totalCount={allVideos.length}
-                unfiledCount={allVideos.filter((v) => v.folder_id === null).length}
+                selectedId={selectedId}
+                totalCount={videos.length}
+                unfiledCount={videos.filter((v) => v.folder_id === null).length}
                 onSelect={setActiveFolder}
                 onCreate={createFolder}
                 onRename={renameFolder}
                 onDelete={removeFolder}
                 onDropVideo={moveVideo}
-              />
-
-              <VideoList
-                videos={videos}
-                selectedId={selectedId}
-                folders={folders}
-                onSelect={setSelectedId}
+                onSelectVideo={setSelectedId}
                 onAnalyze={startAnalysis}
                 onMove={moveVideo}
               />
