@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
-import type { Folder, Job, PickerInfo, VideoDetail, VideoSummary } from './types'
+import type {
+  Chapter,
+  Folder,
+  Job,
+  MindMapNode,
+  PickerInfo,
+  VideoDetail,
+  VideoSummary,
+} from './types'
 import VideoPlayer from './components/VideoPlayer'
 import ChapterList from './components/ChapterList'
 import MindMap from './components/MindMap'
@@ -230,6 +238,61 @@ export default function App() {
     }
   }
 
+  // ---------------------------------------------------------------- 章节 / 导图编辑
+
+  /** 重新拉详情：章节与导图互相影响，局部合并很容易漏掉一边 */
+  const reloadDetail = async (videoId: number) => {
+    const d = await api.getVideo(videoId)
+    setDetail(d)
+    return d
+  }
+
+  const saveMindmap = async (tree: MindMapNode) => {
+    if (!detail) return
+    try {
+      const r = await api.patchMindmap(detail.id, tree)
+      // 用后端返回的树为准：它做过清洗（补 id、夹取时间戳），
+      // 前端本地的乐观值可能与之不一致，直接覆盖可避免「看着存了其实没存」
+      setDetail({ ...detail, mindmap: r.tree, chapters: r.chapters })
+    } catch (e) {
+      setError(String((e as Error).message || e))
+    }
+  }
+
+  const addChapter = async () => {
+    if (!detail) return
+    try {
+      await api.addChapter(detail.id, { title: '新章节', start: currentTime })
+      await reloadDetail(detail.id)
+    } catch (e) {
+      setError(String((e as Error).message || e))
+    }
+  }
+
+  const patchChapter = async (chapterId: number, patch: Partial<Chapter>) => {
+    if (!detail) return
+    try {
+      const r = await api.patchChapter(detail.id, chapterId, patch)
+      setDetail({
+        ...detail,
+        chapters: detail.chapters.map((c) => (c.id === chapterId ? r.chapter : c)),
+      })
+    } catch (e) {
+      setError(String((e as Error).message || e))
+    }
+  }
+
+  const removeChapter = async (chapterId: number) => {
+    if (!detail) return
+    try {
+      await api.deleteChapter(detail.id, chapterId)
+      // 删的若是由导图节点生成的章节，后端会清掉该节点时间戳 -> 导图也变了
+      await reloadDetail(detail.id)
+    } catch (e) {
+      setError(String((e as Error).message || e))
+    }
+  }
+
   const startAnalysis = async (videoId: number, force = false) => {
     setError('')
     try {
@@ -411,6 +474,9 @@ export default function App() {
                     chapters={detail.chapters}
                     currentTime={currentTime}
                     onSeek={(t, end) => seekTo(t, end)}
+                    onAdd={addChapter}
+                    onPatch={patchChapter}
+                    onDelete={removeChapter}
                   />
                 </section>
               )}
@@ -449,7 +515,12 @@ export default function App() {
               <div className="flex-1 min-h-0 p-3">
                 {rightTab === 'mindmap' ? (
                   detail.mindmap ? (
-                    <MindMap tree={detail.mindmap} currentTime={currentTime} onSeek={seekTo} />
+                    <MindMap
+                      tree={detail.mindmap}
+                      currentTime={currentTime}
+                      onSeek={seekTo}
+                      onSaveTree={saveMindmap}
+                    />
                   ) : (
                     <div className="text-xs text-gray-400 text-center py-8">
                       {detail.status === 'ready'

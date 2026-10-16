@@ -7,15 +7,26 @@
 
 导图中每个节点都可以带 start 时间戳；没有自己独立时间点的节点
 （例如纯分类节点）会继承最近子节点的 start，点击时跳转到对应位置。
+
+每个节点都有一个 **稳定的 id**（`nd0` / `nd1` …）。这是后来支持「手工编辑导图」
+的前提：没有 id 就只能靠「第几个子节点」这种位置来指代节点，用户改一次文案、
+加一个兄弟节点，之前生成的章节就会认错人。
 """
 
 from __future__ import annotations
+
+import itertools
 
 from core.config import settings
 from providers.llm import LLMError, get_llm
 
 MAX_DEPTH = 3          # 根节点算第 0 层，实际是「中心主题 -> 主分支 -> 子分支」
 MAX_CHILDREN = 7       # 每层最多子节点数，超过会让导图难以阅读
+MAX_LABEL = 40         # 节点文案上限，与提示词里的「不超过 15 字」不冲突（兜底）
+
+#: 节点缩放系数的允许区间。放大到 2 倍还能读，再大就会把整张图撑爆。
+MIN_SCALE = 0.8
+MAX_SCALE = 2.0
 
 
 SYSTEM_PROMPT = """你是一位知识结构化专家，擅长把线性内容重组成层次清晰的思维导图。
@@ -120,8 +131,14 @@ def _clamp_to_chapters(t: float | None, bounds: list[tuple[float, float]]) -> fl
 
 
 def normalize_tree(tree: dict, chapters: list[dict]) -> dict:
-    """递归清洗导图：限深、限宽、去空、校正时间戳、给空节点继承子节点时间。"""
+    """递归清洗导图：限深、限宽、去空、校正时间戳、给空节点继承子节点时间。
+
+    顺带给每个节点分配稳定 id——见本模块顶部说明：没有 id 就无法支持
+    「用户手工编辑导图后章节还能对上号」。
+    """
     bounds = _chapter_bounds(chapters)
+    ids = itertools.count()
+    next_id = lambda: f"nd{next(ids)}"  # noqa: E731  局部闭包，比传参更省事
 
     def walk(node: dict, depth: int) -> dict | None:
         if not isinstance(node, dict):
@@ -130,7 +147,11 @@ def normalize_tree(tree: dict, chapters: list[dict]) -> dict:
         if not label:
             return None
 
-        out: dict = {"label": label[:40], "start": _clamp_to_chapters(node.get("start"), bounds)}
+        out: dict = {
+            "id": next_id(),
+            "label": label[:MAX_LABEL],
+            "start": _clamp_to_chapters(node.get("start"), bounds),
+        }
 
         children_raw = node.get("children") or []
         if not isinstance(children_raw, list):
@@ -165,6 +186,179 @@ def normalize_tree(tree: dict, chapters: list[dict]) -> dict:
     return cleaned
 
 
+# ------------------------------------------------------------------ 树操作
+#
+# 下面这组函数只做一件事：让用户能在导图上「增删改节点」，
+# 且每次改动都能被章节同步逻辑准确追踪。
+#
+# 约定：这些函数**原地修改传入的树**（调用方负责先 deepcopy，
+# 否则 SQLAlchemy 检测不到 JSON 列的变化，改动会静默丢失——
+# 这是个不报错、只是「保存了但没生效」的坑）。
+
+def _next_free_id(used: set[str]) -> str:
+    for i in itertools.count():
+        cand = f"nd{i}"
+        if cand not in used:
+            return cand
+    raise RuntimeError("不可能走到这里")  # pragma: no cover
+
+
+def iter_nodes(tree: dict) -> list[tuple[dict, str | None, int]]:
+    """按深度优先展开成 [(节点, 父id, 深度)]。"""
+    out: list[tuple[dict, str | None, int]] = []
+
+    def walk(node: dict, parent: str | None, depth: int):
+        if not isinstance(node, dict):
+            return
+        out.append((node, parent, depth))
+        for kid in node.get("children") or []:
+            walk(kid, node.get("id"), depth + 1)
+
+    walk(tree, None, 0)
+    return out
+
+
+def collect_ids(tree: dict) -> set[str]:
+    return {n.get("id") for n, _p, _d in iter_nodes(tree) if n.get("id")}
+
+
+def ensure_node_ids(tree: dict) -> dict:
+    """给缺 id 的节点补上 id，并消除重复 id。返回新树（不改动入参）。
+
+    历史数据没有 id：analyze 流程在旧版本生成的导图里每个节点只有 label/start，
+    不补 id 的话这些视频就永远用不了编辑功能。
+    """
+    used: set[str] = set()
+
+    def walk(node: dict) -> dict:
+        out = {k: v for k, v in node.items() if k != "children"}
+        nid = str(out.get("id") or "").strip()
+        if not nid or nid in used:
+            nid = _next_free_id(used)
+        used.add(nid)
+        out["id"] = nid
+        kids = node.get("children")
+        if isinstance(kids, list):
+            out["children"] = [walk(k) for k in kids if isinstance(k, dict)]
+        return out
+
+    return walk(tree)
+
+
+def find_node(tree: dict, node_id: str) -> dict | None:
+    for node, _parent, _depth in iter_nodes(tree):
+        if node.get("id") == node_id:
+            return node
+    return None
+
+
+def node_depth(tree: dict, node_id: str) -> int | None:
+    for node, _parent, depth in iter_nodes(tree):
+        if node.get("id") == node_id:
+            return depth
+    return None
+
+
+def clamp_scale(raw: object) -> float:
+    """把缩放系数约束到 [MIN_SCALE, MAX_SCALE]。非法值一律按 1.0 处理。"""
+    try:
+        v = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 1.0
+    return max(MIN_SCALE, min(MAX_SCALE, round(v, 2)))
+
+
+def set_node(
+    tree: dict,
+    node_id: str,
+    *,
+    label: str | None = None,
+    start: float | None = None,
+    scale: float | None = None,
+) -> bool:
+    """修改单个节点的文案 / 时间戳 / 缩放。返回是否命中。"""
+    node = find_node(tree, node_id)
+    if node is None:
+        return False
+    if label is not None:
+        text = str(label).strip()
+        if text:
+            node["label"] = text[:MAX_LABEL]
+    if start is not None:
+        node["start"] = float(start)
+    if scale is not None:
+        node["scale"] = clamp_scale(scale)
+    return True
+
+
+def add_child(
+    tree: dict,
+    parent_id: str,
+    label: str = "新节点",
+    start: float | None = None,
+    scale: float = 1.0,
+) -> str | None:
+    """在指定节点下挂一个子节点，返回新节点 id；超限或父节点不存在时返回 None。
+
+    用户虽然可以手工加节点，但仍然要受 MAX_DEPTH / MAX_CHILDREN 约束——
+    没有约束的树会在几下点击之后变成一张谁也读不懂的蜘蛛网。
+    """
+    parent = find_node(tree, parent_id)
+    if parent is None:
+        return None
+    depth = node_depth(tree, parent_id) or 0
+    if depth + 1 > MAX_DEPTH:
+        return None
+    kids = parent.get("children")
+    if not isinstance(kids, list):
+        kids = []
+        parent["children"] = kids
+    if len(kids) >= MAX_CHILDREN:
+        return None
+
+    nid = _next_free_id(collect_ids(tree))
+    kids.append(
+        {
+            "id": nid,
+            "label": str(label).strip()[:MAX_LABEL] or "新节点",
+            "start": start,
+            "scale": clamp_scale(scale),
+        }
+    )
+    return nid
+
+
+def clear_start(tree: dict, node_id: str) -> bool:
+    """清掉某个节点的时间戳（对应「删掉由它生成的章节」）。"""
+    node = find_node(tree, node_id)
+    if node is None:
+        return False
+    node["start"] = None
+    return True
+
+
+def remove_node(tree: dict, node_id: str) -> bool:
+    """删除节点（连带其整棵子树）。根节点不允许删除——删了树就没了。"""
+    if tree.get("id") == node_id:
+        return False
+
+    def walk(node: dict) -> bool:
+        kids = node.get("children")
+        if not isinstance(kids, list):
+            return False
+        for i, kid in enumerate(kids):
+            if not isinstance(kid, dict):
+                continue
+            if kid.get("id") == node_id:
+                kids.pop(i)
+                return True
+            if walk(kid):
+                return True
+        return False
+
+    return walk(tree)
+
+
 def flatten_tree(tree: dict) -> list[dict]:
     """把树压平成带层级的列表，供前端做「导图节点 <-> 章节」的联动查找。"""
     out: list[dict] = []
@@ -173,8 +367,10 @@ def flatten_tree(tree: dict) -> list[dict]:
         cur_path = f"{path}/{node['label']}" if path else node["label"]
         out.append(
             {
+                "id": node.get("id"),
                 "label": node["label"],
                 "start": node.get("start"),
+                "scale": clamp_scale(node.get("scale")),
                 "depth": depth,
                 "path": cur_path,
             }

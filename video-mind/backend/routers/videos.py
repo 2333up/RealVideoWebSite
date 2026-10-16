@@ -7,17 +7,20 @@
 
 from __future__ import annotations
 
+import copy
 import re
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from core.database import get_db
 from core.media_types import MIME_BY_EXT, VIDEO_EXT, is_video_file
 from core.models import Chapter, Folder, MindMap, Transcript, Video
+from pipeline import mindmap as mindmap_ops
 from routers import usage as usage_router
 # 文件夹相关的纯逻辑放在 folders 模块里统一维护（那里也对外暴露同名接口）
 from routers.folders import folder_to_dict, get_or_create_folder
@@ -53,14 +56,22 @@ def video_to_dict(v: Video, with_detail: bool = False) -> dict:
             {"provider": v.transcript.provider, "segments": v.transcript.segments}
             if v.transcript else None
         )
+        # id 与 source_node_id 必须一起下发：前端要靠 id 调 PATCH/DELETE，
+        # 靠 source_node_id 判断这条章节是不是「由导图节点驱动的」
+        # （是的话要提示用户：改导图节点的时间会覆盖这里的修改）。
         data["chapters"] = [
             {
-                "idx": c.idx, "title": c.title, "start": c.start, "end": c.end,
+                "id": c.id, "idx": c.idx, "title": c.title, "start": c.start, "end": c.end,
                 "summary": c.summary, "key_points": c.key_points,
+                "source_node_id": c.source_node_id,
             }
             for c in sorted(v.chapters, key=lambda x: x.idx)
         ]
-        data["mindmap"] = v.mindmap.tree if v.mindmap else None
+        # 读到旧版本导图（节点没有 id）时顺手补上，前端才有稳定的编辑对象。
+        # 这是纯函数、不写库，真正的落库发生在用户第一次保存时。
+        data["mindmap"] = (
+            mindmap_ops.ensure_node_ids(v.mindmap.tree) if v.mindmap else None
+        )
     return data
 
 
@@ -416,6 +427,7 @@ class ChapterPatch(BaseModel):
     start: float | None = None
     end: float | None = None
     summary: str | None = None
+    key_points: list[str] | None = None
 
 
 @router.patch("/{video_id}/chapters/{chapter_id}")
@@ -427,14 +439,354 @@ def patch_chapter(
     LLM 的分章不总是完美，给用户一个「能动手指改」的出口，
     比反复调 prompt 更实际。
     """
-    c = db.get(Chapter, chapter_id)
-    if not c or c.video_id != video_id:
-        raise HTTPException(404, "章节不存在")
-    for field in ("title", "start", "end", "summary"):
+    v, c = _video_and_chapter(db, video_id, chapter_id)
+    for field in ("title", "start", "end", "summary", "key_points"):
         val = getattr(patch, field)
         if val is not None:
             setattr(c, field, val)
+    _assert_valid_range(c, v.duration)
+    db.commit()
+    return {"ok": True, "chapter": chapter_to_dict(c)}
+
+
+class ChapterCreate(BaseModel):
+    title: str
+    start: float = 0.0
+    end: float | None = None
+    summary: str = ""
+    key_points: list[str] = Field(default_factory=list)
+
+
+@router.post("/{video_id}/chapters")
+def create_chapter(video_id: int, body: ChapterCreate, db: Session = Depends(get_db)):
+    """手工新增一条章节（不来自导图节点）。
+
+    为什么单独留这个入口：有些章节是用户边看边记的，
+    它不对应导图里任何一个节点，不该被导图同步逻辑管着。
+    """
+    v = db.get(Video, video_id)
+    if not v:
+        raise HTTPException(404, "视频不存在")
+
+    next_idx = _next_idx(db, video_id)
+
+    c = Chapter(
+        video_id=video_id,
+        idx=next_idx,
+        title=body.title.strip() or f"第 {next_idx + 1} 章",
+        start=max(0.0, float(body.start)),
+        end=float(body.end) if body.end is not None else max(0.0, float(body.start)),
+        summary=body.summary,
+        key_points=list(body.key_points),
+        source_node_id=None,
+    )
+    # 只给了起点没给终点时，默认覆盖到下一个已有章节的起点，否则到片尾
+    if body.end is None:
+        c.end = _next_boundary(db, video_id, c.start, v.duration)
+    _assert_valid_range(c, v.duration)
+    db.add(c)
+    db.commit()
+    db.refresh(c)
+    return chapter_to_dict(c)
+
+
+@router.delete("/{video_id}/chapters/{chapter_id}")
+def delete_chapter(video_id: int, chapter_id: int, db: Session = Depends(get_db)):
+    """删除章节。
+
+    若这条章节是某个导图节点生成的，还要把该节点的时间戳一并清掉：
+    否则下一次保存导图时，同步逻辑会「好心」地把它再建回来——
+    用户删一次它长回来一次，看着像灵异事件。
+    """
+    v, c = _video_and_chapter(db, video_id, chapter_id)
+    node_id = c.source_node_id
+    db.delete(c)
+    db.commit()
+
+    cleared = False
+    if node_id and v.mindmap:
+        tree = copy.deepcopy(v.mindmap.tree)
+        cleared = mindmap_ops.clear_start(tree, node_id)
+        if cleared:
+            v.mindmap.tree = tree
+            db.commit()
+    return {"ok": True, "cleared_node_start": cleared}
+
+
+# ------------------------------------------------------------------ 思维导图编辑
+
+class MindMapPatch(BaseModel):
+    tree: dict
+    #: 是否按节点时间戳同步生成/更新章节（默认开——这是本次需求的核心）
+    create_chapters: bool = True
+
+
+@router.patch("/{video_id}/mindmap")
+def patch_mindmap(video_id: int, body: MindMapPatch, db: Session = Depends(get_db)):
+    """保存手工编辑后的思维导图，并按节点时间戳同步章节。
+
+    三件事，按这个顺序做：
+      1. 清洗树（补 id、限深限宽、时间戳夹到视频时长内）
+      2. 有时间戳的节点 -> 保证存在对应章节（新建或更新，不会重复建）
+      3. 树里已不存在的节点 -> 删掉它们当初生成的章节
+    """
+    v = db.get(Video, video_id)
+    if not v:
+        raise HTTPException(404, "视频不存在")
+
+    cleaned = clean_mindmap_tree(body.tree, v.duration)
+    cleaned = mindmap_ops.ensure_node_ids(cleaned)
+
+    # 必须先留一份旧树：判断「这次有没有动过时间戳」靠它。
+    # 覆盖之后再读就只剩新树，所有节点都会变成「新节点」，
+    # 于是保存一次就冒出一批章节——正是要避免的行为。
+    previous = copy.deepcopy(v.mindmap.tree) if v.mindmap else None
+
+    mm = v.mindmap
+    if mm is None:
+        mm = MindMap(video_id=video_id, tree=cleaned)
+        db.add(mm)
+    else:
+        mm.tree = cleaned
+    db.flush()
+
+    created = updated = removed = 0
+    if body.create_chapters:
+        created, updated = sync_chapters_from_mindmap(db, v, cleaned, previous)
+        removed = drop_orphan_node_chapters(db, v, cleaned)
+
+    db.commit()
+    db.refresh(v)
+    return {
+        "ok": True,
+        "tree": v.mindmap.tree if v.mindmap else cleaned,
+        "chapters_created": created,
+        "chapters_updated": updated,
+        "chapters_removed": removed,
+        "chapters": [
+            chapter_to_dict(c) for c in sorted(v.chapters, key=lambda x: x.idx)
+        ],
+    }
+
+
+# ------------------------------------------------------------------ 内部工具
+
+def _video_and_chapter(db: Session, video_id: int, chapter_id: int) -> tuple[Video, Chapter]:
+    v = db.get(Video, video_id)
+    if not v:
+        raise HTTPException(404, "视频不存在")
+    c = db.get(Chapter, chapter_id)
+    if not c or c.video_id != video_id:
+        raise HTTPException(404, "章节不存在")
+    return v, c
+
+
+def _next_idx(db: Session, video_id: int) -> int:
+    """下一个可用的章节序号。
+
+    注意这里**不能**写成 `... .scalar() or -1`：idx 从 0 开始，
+    0 是假值，会被 or 换成 -1，于是新章节复用已有序号，
+    直接撞上 (video_id, idx) 的唯一约束——报错信息是 UNIQUE constraint failed，
+    离真正的原因（一个 or）有十万八千里。
+    """
+    current = (
+        db.query(func.coalesce(func.max(Chapter.idx), -1))
+        .filter(Chapter.video_id == video_id)
+        .scalar()
+    )
+    return (current if current is not None else -1) + 1
+
+
+def _assert_valid_range(c: Chapter, duration: float) -> None:
+    """章节时间必须合法：非负、起点早于终点、且不超出视频时长。"""
+    if c.start < 0:
+        raise HTTPException(400, "章节开始时间不能为负")
     if c.end <= c.start:
         raise HTTPException(400, "章节结束时间必须晚于开始时间")
-    db.commit()
-    return {"ok": True}
+    if duration and c.start > duration + 1:
+        raise HTTPException(400, f"章节开始时间超出了视频时长（{duration:.1f} 秒）")
+
+
+def _next_boundary(db: Session, video_id: int, start: float, duration: float) -> float:
+    """找「下一个已有章节的起点」作为本条的终点；没有就用视频时长。"""
+    later = (
+        db.query(Chapter.start)
+        .filter(Chapter.video_id == video_id, Chapter.start > start + 0.01)
+        .order_by(Chapter.start.asc())
+        .first()
+    )
+    if later and later[0] > start:
+        return float(later[0])
+    return max(start + 1.0, duration if duration else start + 1.0)
+
+
+def clean_mindmap_tree(raw: dict, duration: float) -> dict:
+    """把前端传来的任意 JSON 洗成一棵干净的树。
+
+    前端是可被篡改的，所以这里必须重新做一遍和模型输出同样的校验：
+    限深、限宽、去空节点、时间戳夹到视频时长之内。
+    唯一**不能动**的是节点 id——id 变了，章节与节点的对应关系就断了。
+    """
+    if not isinstance(raw, dict):
+        raise HTTPException(400, "思维导图数据格式不正确")
+
+    def clamp_ts(raw_ts) -> float | None:
+        try:
+            t = float(raw_ts)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        if t < 0:
+            t = 0.0
+        if duration and t > duration:
+            t = float(duration)
+        return round(t, 2)
+
+    def walk(node: object, depth: int) -> dict | None:
+        if not isinstance(node, dict):
+            return None
+        label = str(node.get("label") or "").strip()
+        if not label:
+            return None
+        out: dict = {
+            "label": label[:mindmap_ops.MAX_LABEL],
+            "start": clamp_ts(node.get("start")),
+            "scale": mindmap_ops.clamp_scale(node.get("scale")),
+        }
+        nid = str(node.get("id") or "").strip()
+        if nid:
+            out["id"] = nid
+        # pinned = 用户显式点过「设置时间」。它决定了这个节点要不要生成章节，
+        # 属于用户意图，必须原样保留。
+        if node.get("pinned"):
+            out["pinned"] = True
+        kids_raw = node.get("children")
+        if isinstance(kids_raw, list) and depth < mindmap_ops.MAX_DEPTH:
+            kids = []
+            for kid in kids_raw[: mindmap_ops.MAX_CHILDREN]:
+                cleaned = walk(kid, depth + 1)
+                if cleaned:
+                    kids.append(cleaned)
+            if kids:
+                out["children"] = kids
+        return out
+
+    cleaned = walk(raw, 0)
+    if not cleaned:
+        raise HTTPException(400, "思维导图为空，至少要保留一个节点")
+    return cleaned
+
+
+_MISSING = object()
+
+
+def sync_chapters_from_mindmap(
+    db: Session, v: Video, tree: dict, previous: dict | None
+) -> tuple[int, int]:
+    """按节点时间戳同步章节。
+
+    生成条件（这是最容易被做错的地方）：
+        **只在时间戳「被设置/被改动」时才生成章节**。
+    分析流程生成的导图里，分类节点的时间是从子节点继承来的，
+    若不加区分地「有时间戳就建章节」，用户改一次文案就会凭空多出
+    十几条与已有章节重复的条目——这不是帮忙，是添乱。
+
+    判定顺序：
+      - 上一次保存里没有这个节点（新节点）→ 建
+      - 这个节点的时间戳这次被改了 → 建（或更新）
+      - 用户显式点过「设置时间」→ 节点带 pinned 标记 → 建
+      - 已经存在对应章节 → 始终同步标题与终点，保持跟随节点
+
+    幂等性靠 source_node_id：章节按节点 id 认人，反复保存不会重复建。
+    """
+    timed = [(n, d) for n, _p, d in mindmap_ops.iter_nodes(tree) if n.get("start") is not None]
+    timed.sort(key=lambda x: float(x[0]["start"]))
+
+    prev_starts: dict[str, object] = {}
+    if previous:
+        for n, _p, _d in mindmap_ops.iter_nodes(previous):
+            prev_starts[str(n.get("id"))] = n.get("start")
+
+    by_node = {c.source_node_id: c for c in v.chapters if c.source_node_id}
+    next_idx = _next_idx(db, v.id)
+
+    created = updated = 0
+    for i, (node, _depth) in enumerate(timed):
+        start = float(node["start"])
+        end = (
+            float(timed[i + 1][0]["start"])
+            if i + 1 < len(timed)
+            else (float(v.duration) if v.duration else start + 1.0)
+        )
+        if end <= start:
+            end = float(v.duration) if v.duration and v.duration > start else start + 1.0
+        title = str(node.get("label") or "未命名节点")
+
+        nid = str(node.get("id"))
+        prev = prev_starts.get(nid, _MISSING)
+        touched = prev is _MISSING or prev != node.get("start") or bool(node.get("pinned"))
+
+        c = by_node.get(nid)
+        if c is None:
+            if not touched:
+                continue  # 时间点没动过、也没显式标记 -> 不自动造章节
+            db.add(
+                Chapter(
+                    video_id=v.id,
+                    idx=next_idx,
+                    title=title,
+                    start=start,
+                    end=end,
+                    summary="",
+                    key_points=[],
+                    source_node_id=node.get("id"),
+                )
+            )
+            next_idx += 1
+            created += 1
+            continue
+
+        changed = False
+        for field, value in (("title", title), ("start", start), ("end", end)):
+            if getattr(c, field) != value:
+                setattr(c, field, value)
+                changed = True
+        if changed:
+            updated += 1
+    return created, updated
+
+
+def drop_orphan_node_chapters(db: Session, v: Video, tree: dict) -> int:
+    """删掉「不再对应一个带时间戳节点」的章节。
+
+    两种情形都会走到这里：
+      - 节点被用户删了 -> 它的章节跟着走
+      - 节点还在，但时间戳被清掉了 -> 同样不该再留着章节
+    所以「存活」的判定是**节点存在且仍带时间戳**，缺一不可。
+
+    只删 source_node_id 非空的（即由节点生成的）；分析流程直接生成的章节
+    不会因为导图被编辑而消失，那是用户花钱跑出来的结果。
+    """
+    alive = {
+        n.get("id")
+        for n, _p, _d in mindmap_ops.iter_nodes(tree)
+        if n.get("start") is not None
+    }
+    removed = 0
+    for c in list(v.chapters):
+        if c.source_node_id and c.source_node_id not in alive:
+            db.delete(c)
+            removed += 1
+    return removed
+
+
+def chapter_to_dict(c: Chapter) -> dict:
+    return {
+        "id": c.id,
+        "idx": c.idx,
+        "title": c.title,
+        "start": c.start,
+        "end": c.end,
+        "summary": c.summary,
+        "key_points": c.key_points,
+        "source_node_id": c.source_node_id,
+    }

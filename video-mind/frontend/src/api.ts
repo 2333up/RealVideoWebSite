@@ -1,7 +1,9 @@
 import type {
   AssignResult,
   BatchImportResult,
+  Chapter,
   Folder,
+  MindMapSaveResult,
   FolderImportResult,
   ImportItem,
   Job,
@@ -113,6 +115,31 @@ export const api = {
   clearUsage: (videoId?: number) =>
     request<{ deleted: number }>(`/usage${videoId ? `?video_id=${videoId}` : ''}`, {
       method: 'DELETE',
+    }),
+
+  // ---------------------------------------------------------------- 章节编辑
+  addChapter: (
+    videoId: number,
+    body: { title: string; start: number; end?: number; summary?: string; key_points?: string[] },
+  ) => request<Chapter>(`/videos/${videoId}/chapters`, { method: 'POST', body: JSON.stringify(body) }),
+  patchChapter: (videoId: number, chapterId: number, patch: Partial<Chapter>) =>
+    request<{ ok: boolean; chapter: Chapter }>(`/videos/${videoId}/chapters/${chapterId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+  /** 删除章节。若它来自导图节点，后端会一并清掉该节点的时间戳 */
+  deleteChapter: (videoId: number, chapterId: number) =>
+    request<{ ok: boolean; cleared_node_start: boolean }>(
+      `/videos/${videoId}/chapters/${chapterId}`,
+      { method: 'DELETE' },
+    ),
+
+  // ---------------------------------------------------------------- 思维导图编辑
+  /** 保存编辑后的导图；默认按节点时间戳同步生成/更新章节 */
+  patchMindmap: (videoId: number, tree: unknown, createChapters = true) =>
+    request<MindMapSaveResult>(`/videos/${videoId}/mindmap`, {
+      method: 'PATCH',
+      body: JSON.stringify({ tree, create_chapters: createChapters }),
     }),
 
   // 视频流地址。后端实现了 Range 请求，<video> 才能拖动进度条。

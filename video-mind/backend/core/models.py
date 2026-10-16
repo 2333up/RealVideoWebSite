@@ -115,6 +115,12 @@ class Chapter(Base):
     summary: Mapped[str] = mapped_column(Text, default="")
     # ["要点一", "要点二"]
     key_points: Mapped[list] = mapped_column(JSON, default=list)
+    #: 由哪个思维导图节点生成（节点 id）。不为 None 时意味着这条章节
+    #  「由节点的时间戳驱动」——节点改时间它跟着改，节点被删它也跟着走。
+    #  分析流程直接生成的章节此列为 None，用户手工改它不会被导图覆盖。
+    source_node_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, default=None, index=True
+    )
 
     video: Mapped["Video"] = relationship(back_populates="chapters")
 

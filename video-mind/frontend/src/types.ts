@@ -7,17 +7,27 @@ export interface Segment {
 }
 
 export interface Chapter {
+  /** 章节主键：编辑 / 删除都要用它，之前只下发 idx 导致前端根本无法调用 */
+  id: number
   idx: number
   title: string
   start: number
   end: number
   summary: string
   key_points: string[]
+  /** 由哪个导图节点生成；不为 null 表示这条章节的时间由该节点驱动 */
+  source_node_id: string | null
 }
 
 export interface MindMapNode {
+  /** 节点稳定 id。手工编辑后章节靠它认人，缺失时后端会补 */
+  id?: string
   label: string
   start: number | null
+  /** 节点缩放系数（同时决定字体大小），1 为原始尺寸 */
+  scale?: number | null
+  /** 用户是否显式设置过时间戳。后端据此决定是否生成对应章节 */
+  pinned?: boolean | null
   children?: MindMapNode[]
 }
 
@@ -86,6 +96,16 @@ export interface FolderImportResult {
   failed: { path: string; reason: string }[]
   imported_ids: number[]
   message: string | null
+}
+
+/** 保存导图后的回执：顺带告知这一改影响了几条章节，让「改动生效了」可见 */
+export interface MindMapSaveResult {
+  ok: boolean
+  tree: MindMapNode
+  chapters_created: number
+  chapters_updated: number
+  chapters_removed: number
+  chapters: Chapter[]
 }
 
 export interface AssignResult {

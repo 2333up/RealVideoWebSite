@@ -40,6 +40,7 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, futu
 #: 真上 Alembic 为一个本地小工具不值当，这里用一条明确的清单兜底。
 _EXTRA_COLUMNS: dict[str, list[tuple[str, str]]] = {
     "videos": [("folder_id", "INTEGER")],
+    "chapters": [("source_node_id", "VARCHAR(64)")],
 }
 
 
