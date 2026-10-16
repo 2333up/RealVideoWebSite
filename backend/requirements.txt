@@ -9,5 +9,5 @@ pydantic-settings>=2.6.0
 cryptography>=44.0.0
 python-multipart>=0.0.20
 qrcode>=8.0
-pillow>=11.0.0
+pillow>=12.3.0
 playwright>=1.49.0
