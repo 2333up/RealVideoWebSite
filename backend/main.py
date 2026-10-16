@@ -14,6 +14,7 @@ from app.platforms.base import registry
 from app.platforms.bilibili.adapter import BilibiliAdapter
 from app.platforms.douyin.adapter import DouyinAdapter
 from app.platforms.xiaohongshu.adapter import XiaohongshuAdapter
+from app.platforms.youtube.adapter import YouTubeAdapter
 from app.routers import account as account_router
 from app.routers import download as download_router
 from app.routers import embed as embed_router
@@ -50,6 +51,10 @@ async def lifespan(_app: FastAPI):
     xiaohongshu = XiaohongshuAdapter()
     registry.register(xiaohongshu)
     _adapters.append(xiaohongshu)
+
+    youtube = YouTubeAdapter()
+    registry.register(youtube)
+    _adapters.append(youtube)
 
     logger.info("已注册平台: %s", ", ".join(registry.keys()))
 
