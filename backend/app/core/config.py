@@ -55,6 +55,18 @@ class Settings(BaseSettings):
     # 扫码登录二维码有效期（秒）
     QRCODE_TTL: int = 180
 
+    # ---- YouTube ----
+    # YouTube 在多数网络环境下无法直连，需要显式指定 HTTP 代理。
+    # 留空表示直连（不启用代理）。
+    # 注意：不能依赖环境里的 HTTP_PROXY/HTTPS_PROXY —— 那类变量常指向只允许
+    # 内网白名单的代理，访问 youtube.com 会直接返回 502。
+    YOUTUBE_PROXY: str = ""
+    # YouTube 只提供音视频分离的 DASH 流，下载「带声音的完整视频」必须由
+    # ffmpeg 合并。留空则让 yt-dlp 自行在 PATH 中查找。
+    FFMPEG_LOCATION: str = ""
+    # YouTube 单次搜索页的结果数上限（受页面结构限制，与 SEARCH_PAGE_SIZE 无关）
+    YOUTUBE_SEARCH_LIMIT: int = 60
+
     @property
     def secret_key(self) -> str:
         """惰性持久化并返回对称加密密钥。"""

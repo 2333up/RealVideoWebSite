@@ -11,3 +11,5 @@ python-multipart>=0.0.20
 qrcode>=8.0
 pillow>=11.0.0
 playwright>=1.49.0
+# YouTube 下载：音视频分离流的地址藏在播放器 JS 背后，需由 yt-dlp 解签名并分片下载
+yt-dlp>=2025.1.1

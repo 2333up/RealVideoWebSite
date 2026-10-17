@@ -165,6 +165,20 @@ export const api = {
         (cid ? `&cid=${cid}` : ''),
     ),
 
+  /** 获取 YouTube 视频可下载流列表（清晰度 / 是否含音轨） */
+  fetchYoutubeStreams: (videoId: string) =>
+    request<YoutubeStreamsInfo>(
+      `/platforms/youtube/streams?video_id=${encodeURIComponent(videoId)}`,
+    ),
+
+  /**
+   * YouTube 下载直链（走后端代理：直链绑定 IP 与时效，且浏览器通常连不上 YouTube）。
+   * format_id 传 'merge' 表示最佳视频+最佳音频用 ffmpeg 合并。
+   */
+  youtubeDownloadUrl: (videoId: string, formatId: string) =>
+    `/api/platforms/youtube/download?video_id=${encodeURIComponent(videoId)}` +
+    `&format_id=${encodeURIComponent(formatId)}`,
+
   listAccounts: (platform?: string) =>
     request<{ accounts: AccountBrief[] }>(`/accounts${platform ? `?platform=${platform}` : ''}`),
 
@@ -238,6 +252,30 @@ export interface PlayurlInfo {
   quality_desc: string
   formats: PlayurlFormat[]
   durl: { url: string; size: number; length: number }[]
+}
+
+// ---------------------------------------------------------------- YouTube
+
+export interface YoutubeStream {
+  format_id: string
+  ext: string
+  resolution: string
+  note: string
+  /** 该流是否含画面 */
+  has_video: boolean
+  /** 该流是否含音轨 —— YouTube 的 DASH 流音视频是分开的 */
+  has_audio: boolean
+  filesize: number
+  abr: number
+}
+
+export interface YoutubeStreamsInfo {
+  title: string
+  duration: number
+  thumbnail: string
+  /** 后端能否找到 ffmpeg；决定「音视频合并」选项是否可用 */
+  ffmpeg_available: boolean
+  streams: YoutubeStream[]
 }
 
 /** 播放量之类的数字压缩为「1.2万」 */
