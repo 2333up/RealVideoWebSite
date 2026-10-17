@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import importlib.util
 import logging
+import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -86,6 +89,51 @@ app.include_router(account_router.router)
 app.include_router(hot_router.router)
 app.include_router(embed_router.router)
 app.include_router(download_router.router)
+
+
+# ---------------------------------------------------------------------------
+# 合并 video-mind 后端
+#
+# 把 video-mind 的 FastAPI 应用作为子应用挂载到 /videomind，从而让「单一后端
+# 进程」同时暴露 lingoSeek 与 video-mind 两套 API（视频流、分类、转写、导图…）。
+# 这样两个前端都只需对接一个地址（8000），不再各自起一个后端。
+#
+# 要点：
+# - video-mind 自带一份 CORSMiddleware（allow_origins=["*"]）。若保留，会和本应用
+#   的 CORS 叠加出重复的 Access-Control-Allow-Origin 响应头，浏览器会直接拒绝。
+#   因此挂载前先剥掉它的 CORS，统一由本应用处理跨域。
+# - 加载失败（例如依赖缺失）时记录告警并跳过挂载，保证 lingoSeek 自身仍可启动。
+# ---------------------------------------------------------------------------
+def _mount_videomind(application: FastAPI) -> None:
+    vm_backend = Path(__file__).resolve().parent.parent / "video-mind" / "backend"
+    if not (vm_backend / "main.py").exists():
+        logger.warning("未找到 video-mind 后端，跳过挂载：%s", vm_backend)
+        return
+
+    # 让 video-mind 内部的 `from core / pipeline / routers / providers import ...`
+    # 在导入其 main 时可以被解析
+    sys.path.insert(0, str(vm_backend))
+
+    try:
+        spec = importlib.util.spec_from_file_location("videomind_backend", vm_backend / "main.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["videomind_backend"] = module
+        spec.loader.exec_module(module)
+    except Exception as exc:  # noqa: BLE001 - 加载失败不应拖垮主应用
+        logger.error("video-mind 后端加载失败，其接口将不可用：%s", exc)
+        return
+
+    vm_app = module.app
+    # 剥掉子应用自带的 CORS（见上方说明）
+    vm_app.user_middleware = [
+        m for m in vm_app.user_middleware if m.cls is not CORSMiddleware
+    ]
+    vm_app.middleware_stack = None
+    application.mount("/videomind", vm_app)
+    logger.info("已挂载 video-mind 后端 → /videomind")
+
+
+_mount_videomind(app)
 
 
 @app.get("/api/health", tags=["system"])
