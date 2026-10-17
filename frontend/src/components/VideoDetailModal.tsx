@@ -22,26 +22,22 @@ interface Props {
 /**
  * 视频详情浮层。
  *
- * 屏蔽推荐的思路：不嵌入 www.bilibili.com 的视频页（那个页面通篇是推荐流），
- * 而是——
- *   1. 播放器只用官方 embed 域名 player.bilibili.com（无侧边推荐栏）
- *   2. 标题/UP主/数据/简介等全部由我们调接口后自行渲染
- * 于是推荐内容根本没有落脚点。
+ * 两种视图：
+ *   - 站内页（embed）：服务端代理的 B 站原页面，带登录态、自带评论区，
+ *     按原样呈现（页面由客户端 JS 动态渲染，服务端注入的隐藏规则命中不了
+ *     真实节点，故不做屏蔽）
+ *   - 纯净版（clean）：播放器只用官方 embed 域名 player.bilibili.com
+ *     （无侧边推荐栏），标题/UP主/数据/简介等全部由我们调接口后自行渲染，
+ *     推荐内容根本没有落脚点
  */
 export default function VideoDetailModal({ platform, uid, accentColor, fallback, onClose }: Props) {
   const [detail, setDetail] = useState<ContentCard | null>(fallback)
   const [loading, setLoading] = useState(!fallback)
   const [error, setError] = useState('')
   const panelRef = useRef<HTMLDivElement>(null)
-  const iframeRef = useRef<HTMLIFrameElement>(null)
-  // embed = 代理后的站方页面（自带评论区，已隐藏推荐）
+  // embed = 代理后的站方页面（自带评论区，按原样呈现）
   // clean = 播放器 + 我们自绘的详情与评论（无站方页面，最干净）
   const [viewMode, setViewMode] = useState<'embed' | 'clean'>('embed')
-  // 过滤强度：站方推荐容器的真实类名无法从服务端推断，
-  // 故提供逐级加强的按钮，让用户按实际效果推进
-  const [filterLevel, setFilterLevel] = useState(0)
-  // 已隐藏元素计数：由 iframe 内清扫脚本通过 __lingoseekStats 上报，用于确认净化是否真的生效
-  const [hiddenCount, setHiddenCount] = useState(0)
 
   const isVideo = detail?.kind === 'video'
   const bvid = (detail?.extra?.bvid as string | undefined) ?? ''
@@ -70,7 +66,7 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
   const [downloadQn, setDownloadQn] = useState<number | undefined>(undefined)
 
   // 走服务端代理而非直接 iframe 站方页面：
-  // 同源后注入的 CSS 才能生效（藏掉推荐区），且能带上库中保存的登录态。
+  // 同源后才能带上库中保存的登录态 Cookie，页面里的相对资源也才能正常加载。
   const embedSrc =
     platform === 'bilibili' && bvid
       ? `/api/platforms/bilibili/embed?bvid=${encodeURIComponent(bvid)}`
@@ -147,27 +143,6 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
       document.body.style.overflow = prev
     }
   }, [handleKey])
-
-  // 读取 iframe 内部清扫脚本上报的隐藏数量，用于确认净化是否真的生效
-  useEffect(() => {
-    if (viewMode !== 'embed' || !embedSrc) return
-    const timer = window.setInterval(() => {
-      const win = iframeRef.current?.contentWindow as
-        | (Window & { __lingoseekStats?: { hidden: number } })
-        | undefined
-      if (win?.__lingoseekStats) setHiddenCount(win.__lingoseekStats.hidden)
-    }, 1200)
-    return () => window.clearInterval(timer)
-  }, [viewMode, embedSrc])
-
-  const escalateFilter = () => {
-    const win = iframeRef.current?.contentWindow as
-      | (Window & { __lingoseekEscalate?: () => number })
-      | undefined
-    if (win && typeof win.__lingoseekEscalate === 'function') {
-      setFilterLevel(win.__lingoseekEscalate())
-    }
-  }
 
   // 打开下载弹窗：B 站拉播放直链（分 P + 清晰度），YouTube 拉可下载流列表
   const openDownload = async () => {
@@ -359,14 +334,13 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
                 />
               </div>
             ) : null}
-            {/* ---- 视图片：站内页（代理后同源，已隐藏推荐与头部）---- */}
+            {/* ---- 视图片：站内页（代理后同源，带登录态，按原样呈现）---- */}
             {isVideo ? (
               viewMode === 'embed' && embedSrc ? (
                 <>
-                  {/* 播放器铺满视口剩余空间：减去顶部 header 与底部状态栏 */}
-                  <div className="h-[calc(100vh-76px)] min-h-[360px] w-full bg-black">
+                  {/* 播放器铺满视口剩余空间：减去顶部 header */}
+                  <div className="h-[calc(100vh-48px)] min-h-[360px] w-full bg-black">
                     <iframe
-                      ref={iframeRef}
                       src={embedSrc}
                       title={detail?.title || '视频页面'}
                       className="h-full w-full"
@@ -376,31 +350,6 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
                       // 不含 allow-top-navigation：阻止站方脚本破框跳转
                       sandbox="allow-scripts allow-same-origin allow-popups allow-forms allow-presentation"
                     />
-                  </div>
-                  <div className="flex items-center justify-between gap-3 bg-slate-50 px-3 py-1.5">
-                    <p className="truncate text-[11px] leading-relaxed text-ink-500">
-                      已隐藏站方推荐与头部，以你的登录态加载。
-                      <span
-                        className={`ml-1.5 rounded px-1.5 py-0.5 font-semibold tabular-nums ${
-                          hiddenCount > 0
-                            ? 'bg-emerald-50 text-emerald-600'
-                            : 'bg-amber-50 text-amber-600'
-                        }`}
-                      >
-                        {hiddenCount > 0 ? `已清理 ${hiddenCount} 个元素` : '清理脚本运行中…'}
-                      </span>
-                      {filterLevel > 0 ? `（过滤强度 ${filterLevel}）` : ''}
-                    </p>
-                    {/* 站方推荐容器的类名由客户端 JS 生成、服务端无从得知，
-                        故提供逐级加强的按钮，按实际效果推进 */}
-                    <button
-                      type="button"
-                      onClick={escalateFilter}
-                      className="shrink-0 rounded-lg border border-ink-100 bg-white px-2 py-0.5
-                                 text-[11px] text-ink-700 transition-colors hover:border-ink-300"
-                    >
-                      推荐还在？加强过滤
-                    </button>
                   </div>
                 </>
               ) : (

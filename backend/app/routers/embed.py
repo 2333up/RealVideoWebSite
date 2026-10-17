@@ -38,11 +38,10 @@ _ALLOWED_PROXY_SUFFIXES = (
 
 @router.get("/platforms/bilibili/embed", response_class=HTMLResponse)
 async def bilibili_embed(bvid: str = Query(..., min_length=1), db: Session = Depends(get_db)):
-    """返回净化后的 B 站视频页，供详情浮层以同源 iframe 嵌入。
+    """返回 B 站视频页的同源代理版本，供详情浮层以 iframe 嵌入。
 
-    - 带上库中保存的登录 Cookie 请求站方，首屏与播放器按登录态渲染
-    - 注入 CSS 隐藏推荐列表与站方头部
-    - 同源返回，因此样式对后续 JS 动态渲染的内容同样生效
+    带上库中保存的登录 Cookie 请求站方，首屏与播放器按登录态渲染；
+    页面原样返回，仅修正资源基准路径（相对 URL 指回站方域名）。
     """
     try:
         adapter = registry.get("bilibili")

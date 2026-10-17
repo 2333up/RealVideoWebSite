@@ -695,13 +695,17 @@ class BilibiliAdapter(PlatformAdapter):
     async def fetch_embed_html(
         self, bvid: str, credentials: dict[str, Any] | None = None
     ) -> str:
-        """抓取视频页 HTML 并注入净化样式。
+        """抓取视频页 HTML，以同源代理版本返回。
 
         为什么要走服务端代理而不是直接 iframe 站方页面：
-          1. 跨域 iframe 无法注入 CSS/JS（同源策略），就藏不掉推荐区
-          2. 我们保存在库里的 Cookie 也无法传给跨域 iframe，登录态会丢
-        代理成同源之后，两个问题一并解决：样式全局生效（连 JS 后续渲染的
-        推荐也会被隐藏），首屏与播放器都按登录态渲染。
+          1. 跨域 iframe 带不上库中保存的 Cookie，登录态会丢
+          2. 页面里的相对资源（CSS/JS/图片）会解析到我们的源而 404，
+             用 <base> 把基准指回站方域名才能正常加载
+
+        早先这里还注入过隐藏推荐区/头部的样式，并配一个 MutationObserver
+        脚本持续清扫动态渲染的节点。但 B 站视频页由客户端 JS 动态渲染，
+        SSR 首屏里那些容器都是空占位，注入的规则命中不了真实节点——
+        整套屏蔽逻辑已移除，页面按原样呈现。
         """
         await self.client._ensure_fingerprint()
         headers = {
@@ -715,154 +719,22 @@ class BilibiliAdapter(PlatformAdapter):
             f"https://www.bilibili.com/video/{bvid}", headers=headers, follow_redirects=True
         )
         resp.raise_for_status()
-        return self._inject_cleanup_css(resp.text)
-
-    # 需要隐藏的元素特征。SSR 首屏里推荐区是空的（Vue 的 <!----> 占位），
-    # 真实内容全部由客户端 JS 动态渲染，所以单靠 CSS 选择器命中不了，
-    # 必须由注入的 JS 配合 MutationObserver 持续清扫。
-    CLEANUP_JS = """
-<script id="lingoseek-cleanup-js">
-(function () {
-  // 关键词清单放宽：站方推荐容器的真实类名无法从 SSR 推断（首屏为空），
-  // 故改为「子串包含」而非精确匹配，覆盖 recommend / related / side / header 等变体。
-  // 实测 SSR 已能命中 .rec-list / .video-page-card-small / .right-container，此处兜底动态渲染。
-  var KEYWORDS = [
-    'recommend', 'related', 'side-bar', 'sidebar', 'side_bar',
-    'rec-list', 'video-page-card', 'right-container',
-    'bili-header', 'biliheader', 'mini-header', 'bili-video-card',
-    'feed-card', 'video-card-list', 'right-side', 'fixed-sidenav'
-  ];
-  var observer = null;
-  // 等级越高越激进：0=关键词命中，1=宽泛（含 card/feed/hot/rank），2=按几何位置扫右侧
-  var level = 0;
-  var WIDE = ['card', 'feed', 'hot', 'rank', 'guess', 'more', 'list'];
-
-  function text(el) {
-    return ((el.getAttribute && el.getAttribute('class')) || '') + ' ' +
-           ((el.getAttribute && el.getAttribute('id')) || '');
-  }
-
-  function match(el) {
-    var s = text(el).toLowerCase();
-    if (!s.trim()) return false;
-    for (var i = 0; i < KEYWORDS.length; i++) {
-      if (s.indexOf(KEYWORDS[i]) >= 0) return true;
-    }
-    if (level >= 1) {
-      for (var j = 0; j < WIDE.length; j++) {
-        if (s.indexOf(WIDE[j]) >= 0) return true;
-      }
-    }
-    return false;
-  }
-
-  // 几何兜底：隐藏明显位于主内容右侧的宽栏（推荐区通常固定在右列）
-  function matchByGeometry(el) {
-    if (level < 2) return false;
-    var r = el.getBoundingClientRect();
-    if (!r || r.width < 200) return false;
-    var vw = window.innerWidth || 1000;
-    return r.left > vw * 0.55 && r.height > 200;
-  }
-
-  // 供父页面调用：逐级加强过滤强度（同源 iframe 可直接访问 contentWindow）
-  window.__lingoseekEscalate = function () {
-    level = Math.min(level + 1, 2);
-    sweep();
-    return level;
-  };
-  window.__lingoseekLevel = function () { return level; };
-
-  // 统计已隐藏元素数并暴露给父页面，便于确认清扫是否真的生效
-  var stats = { hidden: 0, last: '' };
-  window.__lingoseekStats = stats;
-
-  function hide(el) {
-    if (!el || el.__lsHidden) return;
-    el.__lsHidden = true;
-    stats.hidden++;
-    stats.last = (el.getAttribute('class') || el.tagName).slice(0, 60);
-    el.style.setProperty('display', 'none', 'important');
-    el.style.setProperty('visibility', 'hidden', 'important');
-    // 右侧栏收起后，让主内容铺满整行（B 站用 grid 分栏）
-    var p = el.parentElement;
-    if (p) {
-      try {
-        p.style.setProperty('grid-template-columns', 'minmax(0, 1fr)', 'important');
-      } catch (e) { /* 忽略非 grid 容器 */ }
-    }
-  }
-
-  function sweep() {
-    if (!document.body) return;
-    var all = document.body.querySelectorAll('*');
-    for (var i = 0; i < all.length; i++) {
-      var el = all[i];
-      if (match(el) || matchByGeometry(el)) hide(el);
-    }
-  }
-
-  function boot() {
-    sweep();
-    try {
-      observer = new MutationObserver(sweep);
-      observer.observe(document.body, {
-        childList: true, subtree: true,
-        attributes: true, attributeFilter: ['class']
-      });
-    } catch (e) { /* 老浏览器降级为一次性清扫 */ }
-    // 兜底：延迟再扫几次，覆盖懒加载与异步渲染
-    [500, 1500, 3000].forEach(function (t) { setTimeout(sweep, t); });
-  }
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', boot);
-  } else {
-    boot();
-  }
-})();
-</script>
-"""
+        return self._inject_base(resp.text)
 
     @classmethod
-    def _inject_cleanup_css(cls, html: str) -> str:
-        """注入隐藏推荐区与站方头部的样式/脚本，并修正资源基准路径。"""
-        css = """
-<style id="lingoseek-cleanup">
-/* ============ 推荐区（真实容器，实测 SSR 命中） ============ */
-/* B 站视频页右侧推荐列表的真实容器是 .rec-list，内部是 .video-page-card-small；
-   .recommend-list-v1 只是空占位，命中它无用，故以下精确锁定真实节点。 */
-.rec-list, .rec-list * { display: none !important; visibility: hidden !important; }
-.video-page-card-small, .video-page-card-small * { display: none !important; visibility: hidden !important; }
-.recommend-list-v1, .recommend-list-v1 * { display: none !important; visibility: hidden !important; }
-/* 右侧栏整体（含 UP 主面板与推荐）。若只想藏推荐、保留 UP 主面板，
-   可去掉 .right-container 这一条，但用户要求「铺满、空白最少」，故整体收起。 */
-.right-container, .right-container-inner { display: none !important; }
-/* ============ 站方头部与频道导航 ============ */
-.bili-header__menu, .bili-header__menu * { display: none !important; visibility: hidden !important; }
-.biliMainHeader, #biliMainHeader, .bili-header, .bili-header__bar,
-.header-channel, .bili-header__channel { display: none !important; }
-/* ============ 左侧主内容铺满，去掉右侧栏留下的空隙 ============ */
-.video-container-v1, .video-container, .video-page-container, .video-info-container {
-    grid-template-columns: minmax(0, 1fr) !important;
-    max-width: none !important;
-}
-.left-container { max-width: none !important; }
-/* 去掉因隐藏头部而残留的顶部留白 */
-body { padding-top: 0 !important; }
-#app, .bili-video-card { margin-top: 0 !important; }
-</style>
-"""
-        # 资源仍从站方域名加载，故保留原站为基准路径
+    def _inject_base(cls, html: str) -> str:
+        """修正资源基准路径，其余不做任何改动。
+
+        页面经同源代理返回后，相对 URL（/static/... 等）会解析到本站而 404，
+        故注入 <base> 指回站方域名。不做页面净化：见 fetch_embed_html 的说明，
+        B 站页面动态渲染，服务端注入的隐藏规则命中不了真实节点。
+        """
         base = '<base href="https://www.bilibili.com/">'
-        payload = f"{base}{css}{cls.CLEANUP_JS}"
         if "<head>" in html:
-            html = html.replace("<head>", f"<head>{payload}", 1)
-        elif "<HEAD>" in html:
-            html = html.replace("<HEAD>", f"<HEAD>{payload}", 1)
-        else:
-            html = payload + html
-        return html
+            return html.replace("<head>", f"<head>{base}", 1)
+        if "<HEAD>" in html:
+            return html.replace("<HEAD>", f"<HEAD>{base}", 1)
+        return base + html
 
     # ============================================================ 登录
     async def start_login(self) -> LoginTicket:
