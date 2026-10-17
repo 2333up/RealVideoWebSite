@@ -6,10 +6,9 @@ interface Props {
   folders: Folder[]
   /** 全量视频：按 folder_id 分组后就地挂在对应分类节点下 */
   videos: VideoSummary[]
-  /** 当前选中的分类：'' 全部 | 'none' 未分类 | '<id>' 某个分类 */
+  /** 当前选中的分类：'none' 未分类 | '<id>' 某个分类 */
   active: string
   selectedId: number | null
-  totalCount: number
   unfiledCount: number
   onSelect: (key: string) => void
   /** parentId=null 建在根级，否则建在该分类下 */
@@ -38,7 +37,6 @@ export default function FolderList({
   videos,
   active,
   selectedId,
-  totalCount,
   unfiledCount,
   onSelect,
   onCreate,
@@ -53,8 +51,8 @@ export default function FolderList({
   const [renamingId, setRenamingId] = useState<number | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [dragOver, setDragOver] = useState<string | null>(null)
-  /** 展开的分类 key 集合；默认展开「全部视频」，打开就有东西看 */
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(['']))
+  /** 展开的分类 key 集合；默认展开「未分类」——它是所有新导入视频的落点，打开就有东西看 */
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(['none']))
   /** undefined=没在新建；null=建在根级；number=建在该分类下 */
   const [newParentId, setNewParentId] = useState<number | null | undefined>(undefined)
 
@@ -63,8 +61,8 @@ export default function FolderList({
   const childrenOf = (parentId: number | null) =>
     folders.filter((f) => (f.parent_id ?? null) === parentId)
 
+  /** key 只有两种取值：'none'=未分类，'<id>'=某个分类。没有「全部」这一档了 */
   const videosOf = (key: string): VideoSummary[] => {
-    if (key === '') return videos
     if (key === 'none') return videos.filter((v) => v.folder_id === null)
     return videos.filter((v) => v.folder_id === Number(key))
   }
@@ -104,11 +102,7 @@ export default function FolderList({
   useEffect(() => {
     setExpanded((prev) => {
       if (prev.has(active)) return prev
-      const next = new Set(prev)
-      if (active === '') next.clear()
-      else next.delete('')
-      next.add(active)
-      return next
+      return new Set(prev).add(active)
     })
   }, [active])
 
@@ -116,14 +110,8 @@ export default function FolderList({
   const toggle = (key: string) => {
     setExpanded((prev) => {
       const next = new Set(prev)
-      if (next.has(key)) {
-        next.delete(key)
-        return next
-      }
-      // 「全部视频」与具体分类互斥：否则同一个视频会同时出现在两处，看着像重复
-      if (key === '') next.clear()
-      else next.delete('')
-      next.add(key)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
       return next
     })
     onSelect(key)
@@ -296,16 +284,6 @@ export default function FolderList({
       </div>
 
       {newParentId === null && newInput(null)}
-
-      <Row
-        label="全部视频"
-        count={totalCount}
-        icon="🗂"
-        active={active === ''}
-        expanded={expanded.has('')}
-        onClick={() => toggle('')}
-      />
-      {children('')}
 
       <Row
         label="未分类"

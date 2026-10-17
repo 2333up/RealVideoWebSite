@@ -498,6 +498,30 @@ export default function MindMap({ tree, videoId, currentTime, onSeek, onSaveTree
   }, [])
 
   /** 顶部操作条要显示的当前作用对象 */
+  /**
+   * 每个节点「点了会跳到哪里」。
+   *
+   * 分类节点自身不存时间戳——它的时间就是第一个子节点的时间，存一份只会
+   * 在大纲里显示成上下两行重复的时间，还会让章节区间交叉。
+   * 所以点击分类节点时要向下找到第一个真正有时间的后代；叶子用自己的时间。
+   */
+  const seekTimeOf = useMemo(() => {
+    const out = new Map<string, number | null>()
+    const walk = (node: MindMapNode): number | null => {
+      const own = typeof node.start === 'number' ? node.start : null
+      let first: number | null = null
+      for (const kid of node.children ?? []) {
+        const t = walk(kid)
+        if (t !== null && first === null) first = t
+      }
+      const value = own ?? first
+      if (node.id) out.set(node.id, value)
+      return value
+    }
+    walk(tree)
+    return out
+  }, [tree])
+
   const toolbarNode = useMemo(() => {
     if (!selectedId) return null
     const n = layout.nodes.find((x) => x.id === selectedId)
@@ -723,6 +747,7 @@ export default function MindMap({ tree, videoId, currentTime, onSeek, onSaveTree
             actions={actions}
             editable={editable}
             tool={tool}
+            seekTimeOf={seekTimeOf}
             selection={selection}
             revealTick={revealTick}
             onDragStop={handleDragStop}
@@ -738,6 +763,7 @@ export default function MindMap({ tree, videoId, currentTime, onSeek, onSaveTree
             currentTime={currentTime}
             editing={editing}
             editable={editable}
+            seekTimeOf={seekTimeOf}
             actions={actions}
           />
         )}
@@ -890,8 +916,11 @@ function ContextMenu({
       >
         新增同级节点
       </Item>
-      <Item disabled={!editable} onClick={run(() => actions.beginEdit(nodeId, 'time'))}>
-        设置时间戳
+      <Item
+        disabled={!editable || hasChildren}
+        onClick={run(() => actions.beginEdit(nodeId, 'time'))}
+      >
+        {hasChildren ? '时间戳（分类节点不单独设置）' : '设置时间戳'}
       </Item>
       <div className="my-1 border-t border-gray-100" />
       <Item kbd="Ctrl+/" onClick={run(() => actions.toggleCollapse(nodeId))} disabled={!hasChildren}>

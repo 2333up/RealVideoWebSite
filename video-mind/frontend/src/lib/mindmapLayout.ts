@@ -330,8 +330,13 @@ export function layoutMindMap(tree: MindMapNode, options: LayoutOptions = {}): L
     const d = dist[key].get(e.depth) ?? H_GAP
     // 节点保留自然宽度（不做列内统一加宽）：右侧列左对齐、左侧列右对齐，
     // 朝向父节点的那一侧成一条直线即可。强行统一列宽会让短标签节点里空出一大片。
-    if (e.side === 1) e.x = rootW / 2 + d
-    else e.x = -rootW / 2 - d - e.width
+    //
+    // ⚠️ 起算点是根的「边缘」不是「中心」：根占 x ∈ [0, rootW]，x 一律是左边缘。
+    // 之前右侧写成 rootW/2 + d，落点比根的右缘还靠左 100 多像素——
+    // 右侧一级节点直接叠在根身上，连线为了够到它们只好往回拐，穿过别的节点。
+    // 左侧公式恰好从左缘往外推，所以只坏右半边，肉眼乍看还以为是「连线乱了」。
+    if (e.side === 1) e.x = rootW + d
+    else e.x = -d - e.width
   }
 
   // ---------------------------------------------------------------- 第四遍：纵向排列

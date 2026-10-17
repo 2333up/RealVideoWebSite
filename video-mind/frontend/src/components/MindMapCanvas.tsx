@@ -31,6 +31,11 @@ const META_FONT = 10
 
 interface MindNodeData extends Record<string, unknown> {
   node: LaidOutNode
+  /**
+   * 点击该节点要跳到的秒数。分类节点自身没有时间戳，
+   * 取第一个有时间的后代——只有叶子才真正持有时间。
+   */
+  seekStart: number | null
   active: boolean
   selected: boolean
   matched: boolean
@@ -120,14 +125,14 @@ function MindNode({ id, data }: NodeProps) {
             d.actions.select(id)
             // 只在只读模式跳转：编辑模式里点节点是「选中」，
             // 一边改内容一边被播放器拖着走，改哪儿就跳哪儿，根本没法干活
-            if (!d.editable && n.start !== null) d.actions.seek(n.start)
+            if (!d.editable && d.seekStart !== null) d.actions.seek(d.seekStart)
           }}
           onDoubleClick={() => {
             // 浏览模式下双击 = 再跳一次时间戳，而不是改名：
             // 只读模式下突然弹出输入框会让人怀疑自己是不是误触删掉了原文
             if (editing) return
             if (d.editable) d.actions.beginEdit(id, 'label')
-            else if (n.start !== null) d.actions.seek(n.start)
+            else if (d.seekStart !== null) d.actions.seek(d.seekStart)
           }}
           onContextMenu={(e) => {
             e.preventDefault()
@@ -135,13 +140,13 @@ function MindNode({ id, data }: NodeProps) {
             d.actions.openMenu(id, e.clientX, e.clientY)
           }}
           title={
-            d.editable
-              ? n.start !== null
-                ? `跳转到 ${formatTs(n.start)}（双击改名，右键更多操作）`
-                : '该节点还没有设置时间戳（右键可设置）'
-              : n.start !== null
-                ? `跳转到 ${formatTs(n.start)}（浏览模式，点「编辑」才能改内容）`
-                : '该节点还没有设置时间戳'
+            d.seekStart === null
+              ? '该分支下还没有设置时间戳的节点'
+              : n.hasChildren
+                ? `跳转到 ${formatTs(d.seekStart)}（分类节点本身不持时间，跳到它第一个子节点）`
+                : d.editable
+                  ? `跳转到 ${formatTs(d.seekStart)}（双击改名，右键更多操作）`
+                  : `跳转到 ${formatTs(d.seekStart)}（浏览模式，点「编辑」才能改内容）`
           }
           className="flex items-center gap-1.5 w-full h-full px-2.5 transition-shadow"
           style={{
@@ -209,7 +214,10 @@ function MindNode({ id, data }: NodeProps) {
                 当前
               </button>
             </span>
-          ) : (
+          ) : n.hasChildren ? null : (
+            // 分类节点不显示时间戳徽章：它的时间等于第一个子节点的时间，
+            // 显示出来就是大纲里上下两行同一个时间，看着像重复数据。
+            // 点击分类节点仍然会跳到它第一个子节点。
             <button
               onClick={(e) => {
                 e.stopPropagation()
@@ -320,6 +328,8 @@ export interface CanvasProps {
   editable: boolean
   /** 左键拖画布的含义：框选还是平移。独立于编辑模式，由用户自己切 */
   tool: MindTool
+  /** 节点 id → 点击时跳转的秒数（分类节点向下找第一个有时间的后代） */
+  seekTimeOf: ReadonlyMap<string, number | null>
   /** 框选/点选得到的节点集合，用于多选环与「整体拖拽」 */
   selection: ReadonlySet<string>
   /** 每自增一次就把当前选中节点带到视口中央（键盘导航 / 搜索跳转时才自增） */
@@ -350,6 +360,7 @@ function Canvas({
   actions,
   editable,
   tool,
+  seekTimeOf,
   selection,
   revealTick,
   onDragStop,
@@ -386,6 +397,7 @@ function Canvas({
       },
       data: {
         node: n,
+        seekStart: seekTimeOf.get(n.id) ?? n.start,
         active: n.id === activeId,
         selected: n.id === selectedId,
         matched: dimming && matches.has(n.id),
@@ -433,7 +445,19 @@ function Canvas({
       })
     }
     return { nodes: flowNodes, edges: flowEdges }
-  }, [layout, activeId, selectedId, selection, matches, query, coarseTime, editing, editable, actions])
+  }, [
+    layout,
+    activeId,
+    selectedId,
+    selection,
+    seekTimeOf,
+    matches,
+    query,
+    coarseTime,
+    editing,
+    editable,
+    actions,
+  ])
 
   /**
    * 结构变了才重新铺满：折叠、聚焦、搜索、切换视频都会改变节点总数，

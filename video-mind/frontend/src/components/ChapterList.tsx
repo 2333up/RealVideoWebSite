@@ -55,22 +55,27 @@ export default function ChapterList({
 
         if (editingId === c.id) {
           return (
-            <ChapterEditor
-              key={c.id}
-              chapter={c}
-              currentTime={currentTime}
-              onCancel={() => setEditingId(null)}
-              onSubmit={(patch) => {
-                onPatch(c.id, patch)
-                setEditingId(null)
-              }}
-            />
+            // data-chapter-id 是滚动定位的锚点：编辑态也要保留，
+            // 否则切到编辑那一瞬间锚点消失，联动滚不动
+            <div key={c.id} data-chapter-id={c.id}>
+              <ChapterEditor
+                key={c.id}
+                chapter={c}
+                currentTime={currentTime}
+                onCancel={() => setEditingId(null)}
+                onSubmit={(patch) => {
+                  onPatch(c.id, patch)
+                  setEditingId(null)
+                }}
+              />
+            </div>
           )
         }
 
         return (
           <div
             key={c.id}
+            data-chapter-id={c.id}
             onClick={() => onSeek(c.start, c.end)}
             className={[
               'group rounded-lg border px-3 py-2.5 cursor-pointer transition',

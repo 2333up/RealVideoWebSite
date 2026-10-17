@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
 import type {
   Chapter,
@@ -28,7 +28,12 @@ export default function App() {
   // 手里根本没有那份数据。
   const [videos, setVideos] = useState<VideoSummary[]>([])
   const [folders, setFolders] = useState<Folder[]>([])
-  const [activeFolder, setActiveFolder] = useState('')
+  /**
+   * 当前分类。默认停在「未分类」('none')：它是所有新导入视频的落点，
+   * 打开就应该看到东西。没有「全部」这一档——视频按分类归位后再横着拉一张
+   * 全量列表，只会让「这个视频到底属于哪个分类」变得模糊。
+   */
+  const [activeFolder, setActiveFolder] = useState('none')
   const [pickerInfo, setPickerInfo] = useState<PickerInfo | null>(null)
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [detail, setDetail] = useState<VideoDetail | null>(null)
@@ -154,6 +159,32 @@ export default function App() {
 
   // ---------------------------------------------------------------- 交互
 
+  const chapterScrollRef = useRef<HTMLDivElement>(null)
+
+  /**
+   * 把包含时间点 t 的章节滚进可视区。
+   *
+   * 章节区独立滚动之后，从导图点节点时目标章节可能远在视口之外——
+   * 视频跳过去了、章节列表却还停在原地，用户会以为是联动失灵。
+   * block:'nearest' 是刻意的：章节本来就在视野里时它一动不动，
+   * 只有真的看不见才滚，避免点一次跳一下的抽搐感。
+   */
+  const scrollChapterIntoView = useCallback(
+    (t: number) => {
+      const box = chapterScrollRef.current
+      const list = detail?.chapters ?? []
+      if (!box || list.length === 0) return
+      const hit =
+        list.find((c) => t >= c.start - 0.01 && t < c.end) ??
+        // 时间点落在章节缝隙里时，退回「最后一个不晚于 t 的章节」
+        [...list].reverse().find((c) => c.start <= t) ??
+        list[0]
+      const el = box.querySelector<HTMLElement>(`[data-chapter-id="${hit.id}"]`)
+      el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    },
+    [detail],
+  )
+
   /**
    * 三向联动的终点：章节、导图、逐字稿的点击全部汇聚到这里。
    *
@@ -161,18 +192,27 @@ export default function App() {
    * 由 VideoPlayer 负责真正执行（它才知道 metadata 是否就绪）。
    * 传 endSeconds 时，播放器会在该时刻自动暂停——「播放本章」变成一个完整动作。
    */
-  const seekTo = useCallback((t: number, endT?: number | null) => {
-    if (!Number.isFinite(t)) return
-    setSeekRequest(makeSeekRequest(t, endT ?? null))
-  }, [])
+  const seekTo = useCallback(
+    (t: number, endT?: number | null) => {
+      if (!Number.isFinite(t)) return
+      setSeekRequest(makeSeekRequest(t, endT ?? null))
+      scrollChapterIntoView(t)
+    },
+    [scrollChapterIntoView],
+  )
 
   // ---------------------------------------------------------------- 导入
 
-  /** 当前分类作为「导入后归入哪里」的默认值：从某个分类里点导入，结果就该进那个分类 */
-  const targetFolderId = useMemo<number | null>(() => {
-    const n = Number(activeFolder)
-    return Number.isFinite(n) && String(n) === activeFolder ? n : null
-  }, [activeFolder])
+  /**
+   * 导入后的落点固定是「未分类」。
+   *
+   * 之前是「落到当前正在看的分类」，听起来贴心，实际有两个毛病：
+   *   1. 站在 A 分类里导入，东西直接沉进 A，用户根本没机会决定它该不该在这
+   *      ——分类的价值就在于**事后**整理，导入时替用户做决定等于取消了这一步；
+   *   2. 站在别处导入时，新视频出现在看不见的地方，像是没导进来。
+   * 统一先进未分类，再由用户拖走，路径才闭合。
+   */
+  const IMPORT_FOLDER_ID: number | null = null
 
   const formatFailures = (failed: { path: string; reason: string }[], limit = 3) => {
     const head = failed
@@ -189,9 +229,13 @@ export default function App() {
     setBusyHint(`正在导入 ${paths.length} 个文件…`)
     setError('')
     try {
-      const r = await api.importMany(paths, targetFolderId)
+      const r = await api.importMany(paths, IMPORT_FOLDER_ID)
       await refresh()
-      if (r.items.length && selectedId === null) setSelectedId(r.items[0].id)
+      // 落点是未分类，就把视图也切过去：否则新视频在看不见的地方，像是没导进来
+      if (r.items.length) {
+        setActiveFolder('none')
+        if (selectedId === null) setSelectedId(r.items[0].id)
+      }
       if (r.failed.length) setError(formatFailures(r.failed))
       else if (r.created === 0 && r.duplicates > 0) setError('这些视频之前已经导入过了')
     } catch (e) {
@@ -207,11 +251,14 @@ export default function App() {
     setBusyHint('正在扫描文件夹…')
     setError('')
     try {
-      const r = await api.importFolder(dir, { recursive: true, create_folder: true })
+      // create_folder=false：不再按目录名自动建分类。
+      // 整目录导入同样先进未分类，保持「导入一律先落地，整理交给人」这一条规则。
+      const r = await api.importFolder(dir, { recursive: true, create_folder: false })
       await refresh()
-      // 自动切到刚建好的分类：用户看到「东西已经归好位了」，而不是散在全量列表里
-      if (r.folder) setActiveFolder(String(r.folder.id))
-      if (r.imported_ids.length) setSelectedId(r.imported_ids[0])
+      if (r.imported_ids.length) {
+        setActiveFolder('none')
+        setSelectedId(r.imported_ids[0])
+      }
       if (r.failed.length) setError(formatFailures(r.failed))
       else if (r.created === 0 && r.duplicates > 0) setError('该目录下的视频都已导入过')
       else if (r.message) setError(r.message)
@@ -227,8 +274,9 @@ export default function App() {
     setBusy(true)
     setError('')
     try {
-      const r = await api.importVideo(path, targetFolderId)
+      const r = await api.importVideo(path, IMPORT_FOLDER_ID)
       await refresh()
+      setActiveFolder('none')
       setSelectedId(r.id)
     } catch (e) {
       setError(String((e as Error).message || e))
@@ -263,8 +311,9 @@ export default function App() {
     setError('')
     try {
       await api.deleteFolder(id)
-      // 正在看被删的分类时自动回到「全部」，否则界面会空得莫名其妙
-      if (activeFolder === String(id)) setActiveFolder('')
+      // 正在看被删的分类时自动回到「未分类」——删除会把视频退回未分类，
+      // 界面跟着切过去，用户才知道东西去哪了
+      if (activeFolder === String(id)) setActiveFolder('none')
       await refresh()
     } catch (e) {
       setError(String((e as Error).message || e))
@@ -415,7 +464,6 @@ export default function App() {
                 videos={videos}
                 active={activeFolder}
                 selectedId={selectedId}
-                totalCount={videos.length}
                 unfiledCount={videos.filter((v) => v.folder_id === null).length}
                 onSelect={setActiveFolder}
                 onCreate={createFolder}
@@ -438,13 +486,19 @@ export default function App() {
           <PanelRail side="left" label="视频库" onExpand={() => setLeftOpen(true)} />
         )}
 
-        {/* 中：播放器 + 章节 */}
-        <main className="flex-1 overflow-y-auto thin-scroll p-4">
+        {/*
+          中：播放器 + 章节。
+          两块**不共用**滚动容器：播放器吸在顶部（shrink-0）不动，
+          章节自己滚。之前整栏一起滚，往下滑几章播放器就消失了——
+          而「边看视频边翻章节」正是这里最主要的使用方式。
+        */}
+        <main className="flex-1 min-w-0 flex flex-col min-h-0">
           {!detail ? (
             <EmptyState />
           ) : (
-            <div className="space-y-4">
-              <VideoPlayer
+            <>
+              <div className="shrink-0 px-4 pt-4 pb-3 space-y-3">
+                <VideoPlayer
                 video={detail}
                 playerRef={playerRef}
                 seekRequest={seekRequest}
@@ -500,7 +554,13 @@ export default function App() {
                   </button>
                 </div>
               )}
+              </div>
 
+              {/* 以下是可滚动区：章节会一直往下排，播放器留在上面不动 */}
+              <div
+                ref={chapterScrollRef}
+                className="flex-1 min-h-0 overflow-y-auto thin-scroll px-4 pb-4 space-y-3"
+              >
               {/* 本次分析的模型用量：分析的直接成本，必须让用户随手可见，
                   而不是藏在设置页里。点「用量」看全局明细。 */}
               {detail.token_usage && detail.token_usage.calls > 0 && (
@@ -532,7 +592,7 @@ export default function App() {
                   <h2 className="text-sm font-semibold text-gray-900 mb-2 flex items-center gap-2">
                     章节
                     <span className="text-[11px] font-normal text-gray-400">
-                      点击任意章节跳转到对应时间
+                      点击任意章节跳转到对应时间；点导图节点会自动滚到这里
                     </span>
                   </h2>
                   <ChapterList
@@ -545,7 +605,8 @@ export default function App() {
                   />
                 </section>
               )}
-            </div>
+              </div>
+            </>
           )}
         </main>
 

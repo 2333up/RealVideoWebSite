@@ -29,6 +29,8 @@ export interface OutlineProps {
   editing: EditingTarget
   /** 编辑模式开关。浏览模式下只读，与画布视图共用同一个开关 */
   editable: boolean
+  /** 节点 id → 跳转秒数（分类节点向下找第一个有时间的后代） */
+  seekTimeOf?: ReadonlyMap<string, number | null>
   actions: MindViewActions
 }
 
@@ -72,6 +74,7 @@ export default function MindOutline(props: OutlineProps) {
             currentTime={coarseTime}
             editing={props.editing}
             editable={editable}
+            seekStart={props.seekTimeOf?.get(n.id) ?? n.start}
             actions={props.actions}
           />
         )
@@ -93,11 +96,13 @@ interface RowProps {
   currentTime: number
   editing: EditingTarget
   editable: boolean
+  /** 点击该行要跳到的秒数；分类节点取第一个有时间的后代 */
+  seekStart: number | null
   actions: MindViewActions
 }
 
 const OutlineRow = forwardRef<HTMLDivElement, RowProps>(function OutlineRow(
-  { node, active, selected, matched, dimmed, query, currentTime, editing, editable, actions },
+  { node, active, selected, matched, dimmed, query, currentTime, editing, editable, seekStart, actions },
   ref,
 ) {
   const isEditing = editing && editing.id === node.id ? editing : null
@@ -137,13 +142,13 @@ const OutlineRow = forwardRef<HTMLDivElement, RowProps>(function OutlineRow(
       onClick={() => {
         if (isEditing) return
         actions.select(node.id)
-        if (node.start !== null) actions.seek(node.start)
+        if (seekStart !== null) actions.seek(seekStart)
       }}
       onDoubleClick={() => {
         if (isEditing) return
         // 只读模式下双击 = 再跳一次；突然弹出输入框会让人以为误触改了内容
         if (editable) actions.beginEdit(node.id, 'label')
-        else if (node.start !== null) actions.seek(node.start)
+        else if (seekStart !== null) actions.seek(seekStart)
       }}
       onContextMenu={(e) => {
         e.preventDefault()
@@ -241,7 +246,9 @@ const OutlineRow = forwardRef<HTMLDivElement, RowProps>(function OutlineRow(
             当前
           </button>
         </span>
-      ) : (
+      ) : node.hasChildren ? null : (
+        // 分类节点不显示时间：它的时间就是第一个子节点的时间，
+        // 显示出来会让大纲上下两行出现同一个时间戳
         <button
           onClick={(e) => {
             e.stopPropagation()

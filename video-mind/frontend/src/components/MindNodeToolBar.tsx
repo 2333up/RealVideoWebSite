@@ -76,7 +76,15 @@ export default function MindNodeToolBar({
       >
         +同级
       </Btn>
-      <Btn disabled={!usable} onClick={onEditTime} title="设置/修改选中节点的时间戳">
+      <Btn
+        disabled={!usable || node?.hasChildren}
+        onClick={onEditTime}
+        title={
+          node?.hasChildren
+            ? '分类节点不单独设置时间——它的时间由第一个子节点决定'
+            : '设置/修改选中节点的时间戳'
+        }
+      >
         时间
       </Btn>
       <Btn
