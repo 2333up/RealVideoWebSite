@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import threading
 import traceback
+from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -128,6 +129,13 @@ def run_pipeline(video_id: int, job_id: int, db_factory) -> None:
         if not job or not video:
             return
 
+        # 起跑时间在这里记，而不是建 job 行时记：
+        # 同一时刻只允许一个任务在跑，排在后面的任务建完行还要排队，
+        # 用 created_at 会把「排队等别人的时间」算进本次耗时里。
+        job.started_at = datetime.now()
+        job.finished_at = None
+        db.commit()
+
         _execute(job, video, db)
     except Exception as exc:  # noqa: BLE001 - 兜底：把任何异常转成用户可见的错误
         db.rollback()
@@ -136,6 +144,8 @@ def run_pipeline(video_id: int, job_id: int, db_factory) -> None:
         if job:
             job.stage = "failed"
             job.error = f"{type(exc).__name__}: {exc}"
+            if job.finished_at is None:
+                job.finished_at = datetime.now()
             db.commit()
         if video:
             video.status = "failed"
@@ -274,5 +284,6 @@ def _execute(job: Job, video: Video, db: Session) -> None:
     # ---------------- 收尾 ----------------
     video.status = "ready"
     video.error = ""
+    job.finished_at = datetime.now()
     db.commit()
     _update(job, db, "done", 100, f"完成：{len(chapters)} 个章节")

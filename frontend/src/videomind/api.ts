@@ -72,8 +72,11 @@ export const api = {
 
   // ---------------------------------------------------------------- 分类文件夹
   listFolders: () => request<{ items: Folder[] }>('/folders'),
-  createFolder: (name: string) =>
-    request<Folder>('/folders', { method: 'POST', body: JSON.stringify({ name }) }),
+  createFolder: (name: string, parentId?: number | null) =>
+    request<Folder>('/folders', {
+      method: 'POST',
+      body: JSON.stringify({ name, parent_id: parentId ?? null }),
+    }),
   renameFolder: (id: number, name: string) =>
     request<Folder>(`/folders/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   deleteFolder: (id: number) =>

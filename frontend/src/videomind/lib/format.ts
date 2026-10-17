@@ -19,6 +19,24 @@ export function formatDuration(seconds: number): string {
   return rest ? `${h} 小时 ${rest} 分` : `${h} 小时`
 }
 
+/**
+ * 秒 -> 「3 分 12 秒」这类精度到秒的耗时说明。
+ *
+ * 和 formatDuration 的区别：那个用于「视频有多长」，分钟级足够；
+ * 这个用于「分析花了多久」，是用户判断要不要再等一次的依据，
+ * 抹掉秒数会让 3 分 59 秒和 3 分 01 秒显示成同一个数字。
+ */
+export function formatElapsed(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds || 0))
+  if (s < 60) return `${s} 秒`
+  const m = Math.floor(s / 60)
+  const rest = s % 60
+  if (m < 60) return rest ? `${m} 分 ${rest} 秒` : `${m} 分`
+  const h = Math.floor(m / 60)
+  const rm = m % 60
+  return rm ? `${h} 小时 ${rm} 分` : `${h} 小时`
+}
+
 export function formatBytes(n: number): string {
   if (!n) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']

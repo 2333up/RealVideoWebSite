@@ -11,7 +11,7 @@
 | 主分支 | `master`（随时可发布），`develop`（集成分支） |
 | 开发分支 | `feat/xxx`、`fix/xxx`、`platform/xxx` |
 | 提交信息 | Conventional Commits：`feat(search): 支持按时长筛选` |
-| 合并方式 | Squash Merge，禁止直接 push 到 `master` / `develop` |
+| 合并方式 | Squash Merge；默认禁止直接 push 到 `master` / `develop`（例外见 §1.1） |
 | 代码审查 | 每个 PR 至少 1 人 Approve |
 | 语言 | 代码注释与文档用中文，标识符用英文 |
 
@@ -30,7 +30,8 @@ platform/xxx← 新平台接入   chore/xxx ← 依赖/工具
 
 规则：
 
-1. `master` 与 `develop` **开启分支保护**，任何人（含 owner）都不得直接 push。
+1. `master` 与 `develop` **开启分支保护**，任何人（含 owner）都不得直接 push
+   ——**例外见 §1.1：本机 `AGENTS.md` 声明了 `master` 角色的使用者可以直接推 `master`**。
 2. 一切改动从 `develop` 切出，PR 回到 `develop`。
 3. 分支名用小写英文 + 连字符，前缀表明性质：`feat/search-filter`、`fix/bili-wbi-403`。
 4. 分支生命期尽量短：**3 天内合并或关闭**，避免长期分支产生巨型冲突。
@@ -42,6 +43,29 @@ git switch -c feat/my-feature
 # ... 开发 ...
 git push -u origin feat/my-feature   # 然后开 PR 到 develop
 ```
+
+### 1.1 例外：本机 `AGENTS.md` 可授予 master 角色
+
+`AGENTS.md` **不在版本库里**——它已被 `.gitignore` 忽略，是每位使用者**只保存在本机**
+的工作约定文件，用来承载本指南无法统一的个性化规则（本机环境、权限、习惯等）。
+
+若某位使用者在自己本机的 `AGENTS.md` 里声明了角色：
+
+```markdown
+角色：master
+```
+
+那么该使用者**可以直接 push `master`**，无需走分支 + PR。
+没有声明该角色的使用者，仍然按上面的规则从 `develop` 切分支、PR 回 `develop`。
+
+**为什么这样设计**：分支保护是为「多人互相 review」准备的。当一个人既是唯一提交者
+又是最终决策者时，强制 PR 只是给自己加一次空白审批——所以需要一个逃生口。
+但逃生口**不能写进仓库**：写进仓库等于对所有 clone 的人生效，保护就形同虚设。
+放在不入库的 `AGENTS.md` 里，权限就**跟着机器走**——换一个人 clone 下来，
+默认仍是受约束的普通角色，保护规则原样生效。
+
+> 注：`AGENTS.md` 与 `CONTRIBUTING.md` 冲突时，以**本机 `AGENTS.md`** 为准
+> （它离使用者更近，也更清楚这台机器上的实际情况）。
 
 ---
 
