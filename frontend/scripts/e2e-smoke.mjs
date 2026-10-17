@@ -36,6 +36,12 @@ const context = browser.contexts()[0] ?? (await browser.newContext())
 const page = await context.newPage()
 await page.setViewportSize({ width: 1360, height: 900 })
 
+// 切换清晰度不应再产生 playurl 请求——档位信息在打开弹窗时已一次拿全
+let playurlCalls = 0
+page.on('request', (r) => {
+  if (r.url().includes('/platforms/bilibili/playurl')) playurlCalls += 1
+})
+
 // 纯净版播放器（player.bilibili.com）的响应码，切视图后断言
 let playerStatus = 0
 page.on('response', (r) => {
@@ -149,12 +155,23 @@ await page.waitForSelector('a[href*="bilibili.com/video/"]', { timeout: 30000 })
 await page.locator('a[href*="bilibili.com/video/"]').first().click()
 await page.waitForSelector('iframe', { timeout: 20000 })
 await page.getByRole('button', { name: /下载/ }).first().click()
-await page.waitForSelector('text=当前可下载清晰度', { timeout: 40000 })
+await page.waitForSelector('text=已选清晰度', { timeout: 40000 })
 const q1080 = page.getByRole('button', { name: /1080P/ })
 const has1080 = (await q1080.count()) > 0
 const label1080 = has1080 ? (await q1080.first().innerText()).replace(/\s+/g, ' ') : ''
 check('下载弹窗出现 1080P（标「合并」）', has1080 && label1080.includes('合并'), label1080 || '未出现')
 check('1080P 档位可用（服务端有 ffmpeg）', has1080 ? await q1080.first().isEnabled() : false)
+
+// 切换清晰度是纯状态变更：档位信息已在打开弹窗时一次拿全，
+// 真正的下载地址由下载接口按 qn 现取，故不应再有 playurl 往返
+const callsBefore = playurlCalls
+if (has1080) {
+  await q1080.first().click()
+  await page.waitForTimeout(1500)
+  check('切换清晰度不再重新请求 playurl', playurlCalls === callsBefore, `新增 ${playurlCalls - callsBefore} 次`)
+  const picked = await page.getByText(/已选清晰度/).first().innerText()
+  check('已选清晰度实时更新', picked.includes('1080P'), picked.replace(/\s+/g, ' ').slice(0, 40))
+}
 
 console.log(failures === 0 ? '\n=== 全部通过 ===' : `\n=== ${failures} 项失败 ===`)
 // 不调 browser.close()：CDP 连接的另一端是后台任务里的浏览器，退出进程自然断开

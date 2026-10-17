@@ -200,21 +200,14 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
     }
   }
 
-  // 切换清晰度：必须重新请求 playurl —— 不同清晰度的直链完全不同，
-  // 沿用旧 durl 只会下到原来那一档。
-  const switchQuality = async (qn: number) => {
-    if (!bvid) return
+  // 切换清晰度只改状态，不再重新请求 playurl。
+  //
+  // 以前必须重新请求，是因为直链（durl）与 qn 一一对应，沿用旧的会下到
+  // 原来那一档。现在后端一次就把全部档位交齐了：formats 列表 + DASH 各档
+  // 的流地址都在第一次响应里，真正的下载地址由下载接口在点击时按 qn 现取。
+  // 于是这里零网络往返——切换是瞬时的，也不再有「切一次卡一下」的等待。
+  const switchQuality = (qn: number) => {
     setDownloadQn(qn)
-    setDownloadLoading(true)
-    setDownloadError('')
-    try {
-      const info = await api.fetchPlayurl(bvid, downloadCid, qn)
-      setPlayurlInfo(info)
-    } catch (err) {
-      setDownloadError(err instanceof Error ? err.message : '获取该清晰度的下载地址失败')
-    } finally {
-      setDownloadLoading(false)
-    }
   }
 
   // 触发下载：走后端代理（B 站直链有防盗链，YouTube 直链绑定 IP 且浏览器常不可达）
@@ -231,7 +224,9 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
   // 当前选中档位是否需要服务端合并（没手动选时以平台实际给的档位为准）。
   // needs_merge = MP4 直链给不到该档位，只能下 DASH 音视频再合并。
   const pickedQn = downloadQn ?? playurlInfo?.quality
-  const pickedNeedsMerge = !!playurlInfo?.formats.find((f) => f.quality === pickedQn)?.needs_merge
+  const pickedFormat = playurlInfo?.formats.find((f) => f.quality === pickedQn)
+  const pickedNeedsMerge = !!pickedFormat?.needs_merge
+  const pickedDesc = pickedFormat?.desc
 
   return (
     <div
@@ -635,9 +630,9 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
                 {/* 清晰度信息 + 选择 */}
                 <div className="rounded-xl bg-slate-50 px-3 py-2.5 text-[11px] leading-relaxed text-ink-600">
                   <p>
-                    当前可下载清晰度：
+                    已选清晰度：
                     <span className="font-semibold text-ink-900">
-                      {playurlInfo.quality_desc || `${playurlInfo.quality}P`}
+                      {pickedDesc || playurlInfo.quality_desc || `${playurlInfo.quality}P`}
                     </span>
                   </p>
                   {playurlInfo.formats.length > 0 ? (
@@ -665,7 +660,7 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
                                     ? '该档位只有音视频分离的流，需服务端下载后合并'
                                     : undefined
                               }
-                              onClick={() => void switchQuality(f.quality)}
+                              onClick={() => switchQuality(f.quality)}
                               className={`rounded-lg px-2.5 py-1 text-[11px] transition-colors ${
                                 active
                                   ? 'bg-bilibili text-white'
