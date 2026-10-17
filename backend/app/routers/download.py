@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import tempfile
 import urllib.parse
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.ffmpeg import ffmpeg_available, merge_av
 from app.platforms.base import registry
 from app.services import account_service
 
@@ -55,8 +57,8 @@ async def bilibili_playurl(
         logger.exception("获取 B 站播放地址失败: %s", exc)
         raise HTTPException(status_code=502, detail=f"获取播放地址失败: {exc}") from exc
 
-    if not info or not info.get("durl"):
-        raise HTTPException(status_code=502, detail="未获取到可下载的播放直链（可能需登录或该视频不可下载）")
+    if not info or not (info.get("durl") or (info.get("dash") or {}).get("video")):
+        raise HTTPException(status_code=502, detail="未获取到可下载的播放地址（可能需登录或该视频不可下载）")
 
     return info
 
@@ -86,16 +88,22 @@ async def bilibili_download(
         logger.exception("获取 B 站下载地址失败: %s", exc)
         raise HTTPException(status_code=502, detail=f"获取下载地址失败: {exc}") from exc
 
-    durl = (info.get("durl") or [])
+    durl = info.get("durl") or []
+    # MP4 直链（fnval=1）清晰度上限 720P：目标档位高于它时，唯一可用的
+    # 是 DASH 的音视频分离流，必须下完再合并，否则要么拿不到、要么无声。
+    need_merge = (qn is not None and qn > (info.get("direct_quality") or 0)) or (
+        not durl and bool((info.get("dash") or {}).get("video"))
+    )
+    if need_merge:
+        return await _download_dash_merged(adapter, info, qn, creds)
+
     if not durl:
         raise HTTPException(status_code=502, detail="未获取到可下载的播放直链（可能需登录或该视频不可下载）")
 
     target_url = durl[0]["url"]
 
     # 文件名：优先标题，回退 bvid；清洗非法字符
-    title = (info.get("title") or bvid).strip()
-    safe_title = "".join(c for c in title if c not in '\\/:*?"<>|').strip() or bvid
-    filename = f"{safe_title}.mp4"
+    filename = _bilibili_filename(info, bvid)
 
     headers = {
         "User-Agent": settings.USER_AGENT,
@@ -128,6 +136,124 @@ async def bilibili_download(
         media_type="video/mp4",
         headers={
             "Content-Disposition": f'attachment; filename="{urllib.parse.quote(filename)}"',
+        },
+    )
+
+
+def _bilibili_filename(info: dict, bvid: str) -> str:
+    """文件名：优先标题，回退 bvid；清洗 Windows 非法字符。"""
+    title = (info.get("title") or bvid).strip()
+    safe_title = "".join(c for c in title if c not in '\\/:*?"<>|').strip() or bvid
+    return f"{safe_title}.mp4"
+
+
+def _bili_stream_headers(adapter, creds) -> dict[str, str]:
+    """B 站流媒体请求头——缺 Referer 或 Cookie 会被 CDN 直接 403。"""
+    headers = {
+        "User-Agent": settings.USER_AGENT,
+        "Referer": "https://www.bilibili.com/",
+        "Accept": "*/*",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+    }
+    cookie = adapter.client._build_cookie(creds)
+    if cookie:
+        headers["Cookie"] = cookie
+    return headers
+
+
+async def _fetch_to_file(client, entry: dict, headers: dict[str, str], path: Path) -> None:
+    """把一条 DASH 流下载到临时文件；主域名失败时依次尝试备用域名。"""
+    last: Exception | None = None
+    for url in [entry.get("url") or "", *(entry.get("backup") or [])]:
+        if not url:
+            continue
+        try:
+            async with client.stream("GET", url, headers=headers) as resp:
+                resp.raise_for_status()
+                with path.open("wb") as fh:
+                    async for chunk in resp.aiter_bytes(chunk_size=1024 * 256):
+                        fh.write(chunk)
+            return
+        except Exception as exc:  # noqa: BLE001 - 换下一个备用域名
+            last = exc
+            logger.warning("DASH 分片下载失败，尝试备用域名: %s", exc)
+    raise RuntimeError(f"DASH 分片下载失败: {last}")
+
+
+async def _download_dash_merged(adapter, info: dict, qn: int | None, creds) -> StreamingResponse:
+    """下载 DASH 视频流 + 音频流，ffmpeg 合并成单个 mp4 后流式返回。
+
+    B 站 1080P 及以上只有音视频分离的流（MP4 直链最高 720P），
+    所以高画质只能「下两个文件 + 合并」，这一步绕不开 ffmpeg。
+    """
+    if not ffmpeg_available():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "该清晰度需要 ffmpeg 合并音视频，但服务端未检测到 ffmpeg。"
+                "请在 .env 配置 FFMPEG_LOCATION，或改选 720P 及以下"
+                "（MP4 直链，无需合并）"
+            ),
+        )
+
+    dash = info.get("dash") or {}
+    videos = [v for v in (dash.get("video") or []) if v.get("url")]
+    audios = [a for a in (dash.get("audio") or []) if a.get("url")]
+    if not videos or not audios:
+        raise HTTPException(status_code=502, detail="未获取到该清晰度的 DASH 音视频流")
+
+    # 同一档位会有多种编码（avc1=H.264 / hev1=H.265 / av01=AV1），
+    # 优先 H.264：兼容性最好，老播放器与剪辑软件都能开；
+    # 只在没有 H.264 时才退而取其他编码。
+    def _rank(v: dict) -> tuple[int, bool]:
+        return (v.get("quality") or 0, (v.get("codecs") or "").startswith("avc1"))
+
+    target = qn or 80
+    lower = [v for v in videos if (v.get("quality") or 0) <= target]
+    chosen = max(lower, key=_rank) if lower else min(videos, key=_rank)
+    audio = audios[0]
+
+    headers = _bili_stream_headers(adapter, creds)
+    client = await adapter.client._ensure_client()
+    tmpdir = tempfile.mkdtemp(prefix="bili-dash-")
+    try:
+        vpath = Path(tmpdir) / "video.m4s"
+        apath = Path(tmpdir) / "audio.m4s"
+        await asyncio.gather(
+            _fetch_to_file(client, chosen, headers, vpath),
+            _fetch_to_file(client, audio, headers, apath),
+        )
+        out = Path(tmpdir) / "merged.mp4"
+        await merge_av(vpath, apath, out)
+    except HTTPException:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        raise
+    except Exception as exc:  # noqa: BLE001
+        # 半途失败必须清场：分片可能上百 MB，留着会静默吃掉磁盘
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        logger.exception("B 站 DASH 合并下载失败")
+        raise HTTPException(status_code=502, detail=f"下载并合并失败: {exc}") from exc
+
+    size = out.stat().st_size
+    filename = _bilibili_filename(info, info.get("bvid") or "")
+
+    async def stream():
+        try:
+            with out.open("rb") as fh:
+                while True:
+                    chunk = await asyncio.to_thread(fh.read, 1024 * 256)
+                    if not chunk:
+                        break
+                    yield chunk
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    return StreamingResponse(
+        stream(),
+        media_type="video/mp4",
+        headers={
+            "Content-Disposition": f'attachment; filename="{urllib.parse.quote(filename)}"',
+            "Content-Length": str(size),
         },
     )
 

@@ -17,6 +17,7 @@ import re
 from typing import Any, ClassVar
 
 from app.core.config import settings
+from app.core.ffmpeg import ffmpeg_available
 from app.platforms.base import (
     Author,
     ContentItem,
@@ -512,9 +513,17 @@ class BilibiliAdapter(PlatformAdapter):
             "bvid": str, "aid": str, "title": str,
             "pages": [{"cid": int, "page": int, "part": str, "duration": int}],
             "current_cid": int, "quality": int, "quality_desc": str,
-            "formats": [{"quality": int, "desc": str}],
+            "formats": [{"quality": int, "desc": str, "needs_merge": bool}],
             "durl": [{"url": str, "size": int, "length": int}],
+            "dash": {"video": [{"quality": int, "url": str, "backup": [str]}],
+                     "audio": [{"url": str, "backup": [str]}]},
+            "direct_quality": int, "ffmpeg_available": bool,
           }
+
+        两套清晰度通道的含义（2026-10-17 实测）：
+          - durl / fnval=1 的 MP4 直链，能直接下载，但**上限 720P**
+          - dash / fnval=16 的音视频分离流，1080P 与更高只在这里下发，
+            必须下载后用 ffmpeg 合并（formats 里 needs_merge=True 标出）
 
         :param qn: 请求的目标清晰度代码（取 support_formats 里的 quality）。
             不传则用 80（1080P）——B 站会在权限不足时自动降级到可用的最高档，
@@ -541,50 +550,95 @@ class BilibiliAdapter(PlatformAdapter):
             cid = cid_list[0] if cid_list else (view.get("cid") or 0)
 
         # playurl 需要 Referer 指向视频页 + 登录态。
-        # 关键参数：
-        #   - qn=80 请求 1080P（游客会自动降级到其最高可用，如 720P/480P）。
-        #     不能写 qn=127（8K）：无大会员时接口直接报 -400「请求错误」。
-        #     用户选定清晰度时传入对应 qn；取不到该档时接口会自行降级，
-        #     降级结果由响应里的 quality 如实回报，不伪造。
-        #   - fnval=1 返回 durl（FLV 直链，可下载）；fnval=16 返回 dash 流（分片）。
-        payload: dict[str, Any] = {
+        #
+        # 两套请求并行发，各取所需：
+        #   fnval=1  → durl：MP4 直链，能直接下载，但**清晰度上限就是 720P**
+        #   fnval=16 → dash：音视频分离流，1080P 及以上只在这里下发
+        # 只发 fnval=1 时 support_formats 里压根没有 1080P，用户会以为是
+        # 登录态没生效——其实是被直链格式卡住了。故两路都问，再合并呈现。
+        #
+        # qn：不传用 80（1080P）。不能写 127（8K），无大会员时接口直接报
+        # -400「请求错误」；取不到该档时接口自行降级，如实回报不伪造。
+        base_payload: dict[str, Any] = {
             "bvid": bvid,
             "cid": cid,
             "qn": int(qn) if qn else 80,
-            "fnval": 1,
             "fnver": 0,
             "fourk": 1,
         }
-        try:
-            play = await self.client.request_json(
-                "GET", "/x/player/playurl", params=payload, credentials=credentials,
-            )
-        except BilibiliError as exc:
-            logger.warning("获取播放地址失败 %s: %s", uid, exc)
-            raise
+        direct, dash_resp = await asyncio.gather(
+            self.client.request_json(
+                "GET", "/x/player/playurl",
+                params={**base_payload, "fnval": 1}, credentials=credentials,
+            ),
+            self.client.request_json(
+                "GET", "/x/player/playurl",
+                params={**base_payload, "fnval": 16}, credentials=credentials,
+            ),
+            return_exceptions=True,
+        )
+        # 一路失败不算致命：还能用另一路降级提供下载
+        if isinstance(direct, BaseException) and isinstance(dash_resp, BaseException):
+            logger.warning("获取播放地址失败 %s: %s", uid, direct)
+            raise direct
+        if isinstance(direct, BaseException):
+            logger.warning("直链请求失败，仅提供 DASH 合并下载 %s: %s", uid, direct)
+            direct = {}
+        if isinstance(dash_resp, BaseException):
+            logger.warning("DASH 请求失败，仅提供直链下载 %s: %s", uid, dash_resp)
+            dash_resp = {}
 
-        # 支持的清晰度列表（去重保序）
+        # 直链实际拿到的档位——高于它的档位只能靠 DASH 合并音视频
+        direct_quality = direct.get("quality") or 0
+
+        # 支持的清晰度列表（去重保序）。以 DASH 的为准：它的 support_formats
+        # 才包含 1080P 及以上的档位，直链那份最多到 720P。
         formats: list[dict[str, Any]] = []
         seen_q: set[int] = set()
-        for f in play.get("support_formats") or []:
+        for f in (dash_resp or direct).get("support_formats") or []:
             q = f.get("quality")
             if q is None or q in seen_q:
                 continue
             seen_q.add(q)
-            formats.append({"quality": q, "desc": f.get("new_description") or f.get("display_desc") or str(q)})
+            formats.append({
+                "quality": q,
+                "desc": f.get("new_description") or f.get("display_desc") or str(q),
+                # 直链给不到的档位，必须下载 DASH 音视频再合并
+                "needs_merge": q > direct_quality,
+            })
         # 若 support_formats 为空，回退 durl 里的清晰度
         if not formats:
-            for d in play.get("durl") or []:
+            for d in direct.get("durl") or []:
                 formats.append({
-                    "quality": play.get("quality") or 0,
-                    "desc": play.get("quality") and f"{play.get('quality')}P" or "默认",
+                    "quality": direct.get("quality") or 0,
+                    "desc": (direct.get("quality") and f"{direct.get('quality')}P") or "默认",
+                    "needs_merge": False,
                 })
 
         # 实际拿到的清晰度（可能与请求的不同 —— 权限不足时会被降级）。
         # 用 support_formats 里的描述把它翻译成人话，而不是甩一个裸数字给前端。
-        actual_q = play.get("quality") or 0
+        actual_q = direct.get("quality") or 0
         desc_by_q = {f["quality"]: f["desc"] for f in formats}
         quality_desc = desc_by_q.get(actual_q) or (f"{actual_q}P" if actual_q else "")
+
+        def _streams(items: list[dict[str, Any]], with_quality: bool) -> list[dict[str, Any]]:
+            """提取 DASH 流的直链（含备用域名，CDN 抽风时后端可自行回落）。"""
+            out: list[dict[str, Any]] = []
+            for it in items or []:
+                url = it.get("baseUrl") or ""
+                if not url:
+                    continue
+                entry: dict[str, Any] = {
+                    "url": url,
+                    "backup": [u for u in (it.get("backupUrl") or []) if u][:2],
+                    # 同一档位 B 站会下发多种编码（avc1=H.264 / hev1=H.265 /
+                    # av01=AV1），下载时要能挑出兼容性最好的那条
+                    "codecs": it.get("codecs") or "",
+                }
+                if with_quality:
+                    entry["quality"] = it.get("id") or it.get("quality") or 0
+                out.append(entry)
+            return out
 
         return {
             "bvid": bvid,
@@ -603,11 +657,19 @@ class BilibiliAdapter(PlatformAdapter):
             "quality": actual_q,
             "quality_desc": quality_desc,
             "formats": formats,
+            # 直链（≤ direct_quality 的档位直接用它，无需 ffmpeg）
             "durl": [
                 {"url": d.get("url") or "", "size": d.get("size") or 0, "length": d.get("length") or 0}
-                for d in (play.get("durl") or [])
+                for d in (direct.get("durl") or [])
                 if d.get("url")
             ],
+            # DASH 分片（高于 direct_quality 的档位用它 + ffmpeg 合并）
+            "dash": {
+                "video": _streams((dash_resp.get("dash") or {}).get("video"), True),
+                "audio": _streams((dash_resp.get("dash") or {}).get("audio"), False),
+            },
+            "direct_quality": direct_quality,
+            "ffmpeg_available": ffmpeg_available(),
         }
 
     async def _fetch_tags(self, bvid: str) -> list[str]:
