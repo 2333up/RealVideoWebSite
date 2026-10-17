@@ -5,8 +5,15 @@
     - 章节已经过时间戳校验，导图直接继承这些「干净」的时间点，
       等于复用了一遍防幻觉的成果，准确性和成本都更优
 
-导图中每个节点都可以带 start 时间戳；没有自己独立时间点的节点
-（例如纯分类节点）会继承最近子节点的 start，点击时跳转到对应位置。
+**时间戳的三条铁律**（踩过坑才定下来）：
+
+    1. 只有**叶子节点**才持有 start。分类节点不存自己的时间——
+       它的时间就是第一个子节点的时间。以前让分类节点「继承」子节点的时间，
+       结果大纲里分类和它的第一个子节点并排显示同一个时间点，
+       看着像重复数据；更糟的是章节同步会把这一对都生成章节，区间直接交叉。
+    2. **同一父节点下的子节点，时间戳必须互不相同且严格递增**。
+       否则大纲从上往下读会出现时间回跳，章节排序也就跟着错了。
+    3. **章节区间互不交叉**：按 start 排序后，每条的 end 就是下一条的 start。
 
 每个节点都有一个 **稳定的 id**（`nd0` / `nd1` …）。这是后来支持「手工编辑导图」
 的前提：没有 id 就只能靠「第几个子节点」这种位置来指代节点，用户改一次文案、
@@ -17,8 +24,7 @@ from __future__ import annotations
 
 import itertools
 
-from core.config import settings
-from providers.llm import LLMError, get_llm
+from providers.llm import LLMError
 
 MAX_DEPTH = 3          # 根节点算第 0 层，实际是「中心主题 -> 主分支 -> 子分支」
 MAX_CHILDREN = 7       # 每层最多子节点数，超过会让导图难以阅读
@@ -28,44 +34,14 @@ MAX_LABEL = 40         # 节点文案上限，与提示词里的「不超过 15 
 MIN_SCALE = 0.8
 MAX_SCALE = 2.0
 
-
-SYSTEM_PROMPT = """你是一位知识结构化专家，擅长把线性内容重组成层次清晰的思维导图。
-
-任务：根据视频的章节信息，生成一棵思维导树。
-
-严格要求：
-1. 只输出一个 JSON 对象，不要解释文字、不要 markdown 代码块。
-2. 结构：{"label": "...", "start": 0, "children": [{"label": "...", "start": 0, "children": [...]}]}
-3. 根节点 label 是整支视频的核心主题（不超过 15 字）。
-4. 第 1 层子节点按「内容模块 / 主题板块」划分，不超过 7 个。
-5. 第 2 层可以把模块拆成更细的知识点，层数总共不超过 3 层。
-6. 每个节点的 label 不超过 15 个字，要具体、有信息量，
-   禁止出现「主要内容」「相关介绍」「其他」这类空话。
-7. **start 字段填该节点内容首次出现的秒数，必须是整数**；
-   可以从所给章节的时间范围中选取，不要超出该章节的范围。
-   纯分类、没有对应具体时段的节点，start 填 null。
-8. 不要照抄章节标题，要做真正的归纳与重组——导图体现的是知识结构，不是目录。"""
+#: 同级相邻节点的最小时间间隔（秒）。
+#: 界面上的时间戳精确到秒，小于 1 秒的差异用户根本看不出来，
+#: 取 1 秒既保证「各不相同」又不改变内容归属。
+MIN_TIME_STEP = 1.0
 
 
-USER_TEMPLATE = """视频主题：{title}
-
-章节信息如下（start / end 单位为秒）：
-
-{chapters}
-
-请生成思维导图 JSON。"""
-
-
-def _render_chapters(chapters: list[dict]) -> str:
-    lines = []
-    for c in chapters:
-        kp = "；".join(c.get("key_points") or [])
-        lines.append(
-            f"- [{c['start']:.0f}s - {c['end']:.0f}s] {c['title']}\n"
-            f"  摘要：{c.get('summary') or '（无）'}\n"
-            f"  要点：{kp or '（无）'}"
-        )
-    return "\n".join(lines)
+# 旧的 LLM 重组方案已移除：它生成的多层分类好看，但节点和章节对不上号。
+# 「一章一节点」的确定性构造见 build_mindmap。
 
 
 def build_mindmap(
@@ -73,26 +49,31 @@ def build_mindmap(
     video_title: str = "",
     on_progress: "callable | None" = None,
 ) -> dict:
-    """输入规范化章节，输出思维导图树。"""
+    """由章节**直接**构造导图：一章一个叶子节点，与章节列表一一对应。
+
+    为什么不再让大模型重组层次（2026-10-17 定下的规矩）：
+        以前这一步会再调一次 LLM 把章节重新编排成多层分类——好看，
+        但节点和章节完全对不上号：大纲里 21 个节点对着 7 条章节，
+        用户没法回答「这个节点是哪条章节」。而「章节总结」是用户
+        阅读导图时的参照物，一一对应是它的前提。
+
+    所以这一步是纯确定性的：根节点 = 视频标题，每个章节挂一个叶子，
+    标题与时间戳原样搬过来。省一次 LLM 调用，也省掉一整类幻觉问题。
+    分析完成后的手工编辑不要求保持对应关系（见 AGENTS/需求记录）。
+    """
     if not chapters:
         raise LLMError("尚未生成章节，无法构建思维导图。")
 
     if on_progress:
         on_progress(85, "正在构建思维导图…")
 
-    llm = get_llm()
-    data = llm.chat_json(
-        SYSTEM_PROMPT,
-        USER_TEMPLATE.format(title=video_title or "未命名视频", chapters=_render_chapters(chapters)),
-        temperature=settings.llm_temperature,
-        max_tokens=settings.llm_max_tokens,
-        purpose="思维导图",
-    )
-
-    if "label" not in data:
-        raise LLMError("模型返回的 JSON 缺少根节点 label。")
-
-    return normalize_tree(data, chapters)
+    tree: dict = {
+        "label": video_title or "章节导图",
+        "children": [
+            {"label": str(c["title"]), "start": c["start"]} for c in chapters
+        ],
+    }
+    return normalize_tree(tree, chapters)
 
 
 # ------------------------------------------------------------------ 规范化
@@ -166,24 +147,89 @@ def normalize_tree(tree: dict, chapters: list[dict]) -> dict:
             if kids:
                 out["children"] = kids
 
-        # 分类节点没有自己的时间点时，继承第一个子节点的时间，
-        # 这样点击任何节点都能跳转，不会出现「点了没反应」
-        if out.get("start") is None:
-            kids = out.get("children") or []
-            for k in kids:
-                if k.get("start") is not None:
-                    out["start"] = k["start"]
-                    break
-
         return out
 
     cleaned = walk(tree, 0)
     if not cleaned:
         raise LLMError("思维导图清洗后为空，请重试。")
-    # 根节点兜底：至少要从 0 秒开始
-    if cleaned.get("start") is None:
+
+    # 根节点同样是「分类节点」：它覆盖整支视频，不该占用 0 秒这个点，
+    # 否则章节同步会把它也当成一条章节，和第一条真实章节撞在一起。
+    # 点击根节点时前端会用 first_timed_descendant 找到开头。
+    enforce_time_order(cleaned)
+
+    # 例外：退化成单节点的导图（没有任何子节点）里，根就是唯一的叶子，
+    # 此时给它 0 秒，保证点它还能跳到视频开头。
+    if not cleaned.get("children") and cleaned.get("start") is None:
         cleaned["start"] = 0.0
     return cleaned
+
+
+def enforce_time_order(tree: dict) -> dict:
+    """把整棵树的时间戳整理成「同级严格递增、分类不持时间」的形态。
+
+    自底向上做两件事，顺序不能反：
+
+    一、同级子节点按时间排序，并把相邻两个拉开至少 MIN_TIME_STEP。
+        模型偶尔会给同级的两个节点同一个时间点，不改的话大纲里就会
+        出现「上下两行时间一样」，章节排序也失去依据。
+
+    二、处理完子节点后，**清掉有子节点的那个节点自己的 start**。
+        分类的时间就是它第一个子节点的时间，存一份只会造成重复显示
+        和章节区间交叉。点击分类时前端会向下找第一个有时间的后代来跳转。
+
+    返回同一棵树（原地修改），方便链式调用。
+    """
+    def walk(node: dict) -> None:
+        kids = [k for k in (node.get("children") or []) if isinstance(k, dict)]
+        if not kids:
+            return  # 叶子：保留自己的时间
+
+        for k in kids:
+            walk(k)
+
+        # 有时间的排前面并按时间升序，没时间的保持原序排在后面
+        timed = [k for k in kids if k.get("start") is not None]
+        untimed = [k for k in kids if k.get("start") is None]
+        timed.sort(key=lambda k: float(k["start"]))
+
+        prev: float | None = None
+        for k in timed:
+            t = float(k["start"])
+            if prev is not None and t <= prev:
+                t = prev + MIN_TIME_STEP
+            k["start"] = round(t, 2)
+            prev = t
+
+        ordered = timed + untimed
+        if ordered is not kids:
+            node["children"] = ordered
+        else:
+            node["children"] = ordered
+
+        # 分类节点不持有自己的时间
+        node.pop("start", None)
+        node.pop("pinned", None)
+
+    walk(tree)
+    return tree
+
+
+def first_timed_descendant(node: dict) -> float | None:
+    """分类节点自身没有时间，取它第一个带时间的后代——点击分类时的跳转目标。"""
+    for kid in node.get("children") or []:
+        if not isinstance(kid, dict):
+            continue
+        s = kid.get("start")
+        if s is not None:
+            try:
+                return float(s)
+            except (TypeError, ValueError):
+                continue
+        deeper = first_timed_descendant(kid)
+        if deeper is not None:
+            return deeper
+    return None
 
 
 # ------------------------------------------------------------------ 树操作

@@ -163,78 +163,46 @@ def test_保存导图_补id并落库(db, video):
     assert db.get(MindMap, db.query(MindMap).first().id).tree["id"] == "nd0"
 
 
-def test_有时间戳的节点生成章节(db, video):
-    r = videos_mod.patch_mindmap(video.id, body(tree=SIMPLE_TREE, create_chapters=True), db)
-    assert r["chapters_created"] == 3  # 根 + 两个子节点
-    node_chapters = [c for c in r["chapters"] if c["source_node_id"]]
-    assert len(node_chapters) == 3
-    # 终点 = 下一个带时间戳节点的时间，最后一个到片尾
-    starts = sorted(c["start"] for c in node_chapters)
-    assert starts == [0, 10, 60]
-    last = max(node_chapters, key=lambda c: c["start"])
-    assert last["end"] == 100.0
+def test_保存导图不影响章节(db, video):
+    """分析完成后导图与章节一一对应；之后的编辑是两件独立的事，
+    保存导图不该凭空增删任何章节（2026-10-17 需求变更）。"""
+    videos_mod.patch_mindmap(video.id, body(tree=SIMPLE_TREE, create_chapters=True), db)
+    before = db.query(Chapter).count()
 
-
-def test_只改文案不会自动造章节(db, video):
-    """分析生成的节点时间戳大多是继承来的，用户只改文案时不该冒出新章节。
-
-    这条最贴近真实场景：用户打开一张已经分析好的导图，改了个错别字就保存。
-    如果这时候凭空多出十几条章节，功能就等于帮倒忙。
-    """
-    videos_mod.patch_mindmap(video.id, body(tree=SIMPLE_TREE, create_chapters=False), db)
     tree = db.query(MindMap).first().tree
-    mm.set_node(tree, "nd0", label="只改了文案")
-
+    mm.set_node(tree, "nd0", label="改名了")
     r = videos_mod.patch_mindmap(video.id, body(tree=tree, create_chapters=True), db)
+
     assert r["chapters_created"] == 0
-    assert db.query(Chapter).count() == 1  # 只剩那条原始章节
-
-
-def test_显式设置时间戳的节点才生成章节(db, video):
-    """用户点「设置时间」的节点才生成章节，继承来的时间戳不自动生成。"""
-    videos_mod.patch_mindmap(video.id, body(tree=SIMPLE_TREE, create_chapters=False), db)
-    tree = db.query(MindMap).first().tree
-    target = tree["children"][0]
-    target["pinned"] = True
-
-    r = videos_mod.patch_mindmap(video.id, body(tree=tree, create_chapters=True), db)
-    assert r["chapters_created"] == 1
-    assert r["chapters"][-1]["source_node_id"] == target["id"]
+    assert r["chapters_removed"] == 0
+    assert db.query(Chapter).count() == before
 
 
 def test_重复保存是幂等的(db, video):
+    r1 = videos_mod.patch_mindmap(video.id, body(tree=SIMPLE_TREE, create_chapters=True), db)
+    r2 = videos_mod.patch_mindmap(video.id, body(tree=SIMPLE_TREE, create_chapters=True), db)
+    assert r1["tree"] == r2["tree"], "同一棵树保存两次，结果必须完全一致"
+    assert db.query(Chapter).count() == 1  # 只有那条原始章节
+
+
+def test_分叉树保存_不碰章节(db, video):
+    """重分析会在服务端重新生成导图（全新 id）；页面里若还拿着旧树保存，
+    顶多把导图盖回去，章节一个都不能动。真实事故：旧逻辑一次保存
+    凭空造出 26 条章节。"""
     videos_mod.patch_mindmap(video.id, body(tree=SIMPLE_TREE, create_chapters=True), db)
-    r = videos_mod.patch_mindmap(video.id, body(tree=SIMPLE_TREE, create_chapters=True), db)
-    assert r["chapters_created"] == 0, "同一棵树保存两次不该再建一批章节"
-    assert len([c for c in r["chapters"] if c["source_node_id"]]) == 3
-    assert db.query(Chapter).count() == 4  # 3 条节点章节 + 1 条原始章节
+    before = db.query(Chapter).count()
 
-
-def test_改节点时间_章节跟着变(db, video):
-    videos_mod.patch_mindmap(video.id, body(tree=SIMPLE_TREE, create_chapters=True), db)
-    tree = db.query(MindMap).first().tree
-    child = tree["children"][0]
-    mm.set_node(tree, child["id"], start=25, label="改过的要点")
-    r = videos_mod.patch_mindmap(video.id, body(tree=tree, create_chapters=True), db)
-
-    hit = [c for c in r["chapters"] if c["source_node_id"] == child["id"]][0]
-    assert hit["start"] == 25
-    assert hit["title"] == "改过的要点"
-    # 排在它后面的节点是 60 秒，所以终点应为 60
-    assert hit["end"] == 60
-
-
-def test_删节点_连带删它生成的章节(db, video):
-    videos_mod.patch_mindmap(video.id, body(tree=SIMPLE_TREE, create_chapters=True), db)
-    tree = db.query(MindMap).first().tree
-    victim = tree["children"][0]["id"]
-    mm.remove_node(tree, victim)
-    r = videos_mod.patch_mindmap(video.id, body(tree=tree, create_chapters=True), db)
-
-    assert r["chapters_removed"] == 1
-    assert all(c["source_node_id"] != victim for c in r["chapters"])
-    # 分析生成的原始章节必须还在
-    assert any(c["title"] == "原始章节" for c in r["chapters"])
+    stale = {
+        "label": "根",
+        "start": 0,
+        "children": [
+            {"id": "old-a", "label": "旧要点一", "start": 12, "pinned": True},
+            {"id": "old-b", "label": "旧要点二", "start": 55},
+        ],
+    }
+    r = videos_mod.patch_mindmap(video.id, body(tree=stale, create_chapters=True), db)
+    assert r["chapters_created"] == 0 and r["chapters_removed"] == 0
+    assert db.query(Chapter).count() == before
 
 
 def test_时间戳超出时长被夹取(db, video):
@@ -243,12 +211,40 @@ def test_时间戳超出时长被夹取(db, video):
     assert r["tree"]["children"][0]["start"] == 100.0, "不能超过视频时长，否则点了会跳到不存在的位置"
 
 
-def test_清空节点时间戳后章节消失(db, video):
-    videos_mod.patch_mindmap(video.id, body(tree=SIMPLE_TREE, create_chapters=True), db)
-    tree = db.query(MindMap).first().tree
-    mm.clear_start(tree, tree["children"][0]["id"])
+def test_同级时间戳重复被自动推开(db, video):
+    """同父的子节点时间戳必须互不相同且严格递增——大纲从上往下读
+    不该出现时间回跳或重复。"""
+    tree = {"label": "根", "children": [
+        {"label": "要点一", "start": 30},
+        {"label": "要点二", "start": 30},   # 故意与上一个撞时间
+        {"label": "要点三", "start": 10},   # 顺序还反了
+    ]}
     r = videos_mod.patch_mindmap(video.id, body(tree=tree, create_chapters=True), db)
-    assert len([c for c in r["chapters"] if c["source_node_id"]]) == 2
+    starts = [c["start"] for c in r["tree"]["children"]]
+    assert starts == sorted(starts), f"同级未按时间排序: {starts}"
+    assert len(set(starts)) == len(starts), f"同级时间戳重复: {starts}"
+    # 分类节点（有子节点的）不持有自己的时间
+    assert r["tree"].get("start") is None
+
+
+def test_章节时间范围互不交叉(db, video):
+    """两条硬性要求：起点互不相同，且任意两条章节的时间范围不重叠。"""
+    # 三条手工章节，其中两条起点撞车、一条插在别人中间
+    videos_mod.create_chapter(video.id, body(title="手写一", start=10, end=None), db)
+    videos_mod.create_chapter(video.id, body(title="手写二", start=10, end=40), db)
+    videos_mod.create_chapter(video.id, body(title="手写三", start=30, end=None), db)
+
+    ch = sorted(
+        db.query(Chapter).filter(Chapter.video_id == video.id).all(),
+        key=lambda c: c.start,
+    )
+    starts = [c.start for c in ch]
+    assert len(set(starts)) == len(starts), f"章节起点重复: {starts}"
+
+    for prev, cur in zip(ch, ch[1:]):
+        assert prev.end <= cur.start + 1e-6, (
+            f"章节区间交叉：「{prev.title}」到 {prev.end}，「{cur.title}」从 {cur.start} 开始"
+        )
 
 
 def test_空标签节点被丢弃(db, video):
@@ -295,24 +291,6 @@ def test_修改章节(db, video):
     r = videos_mod.patch_chapter(video.id, c["id"], body(title="改后", start=60, end=95), db)
     assert r["chapter"]["title"] == "改后"
     assert r["chapter"]["end"] == 95
-
-
-def test_删除节点生成的章节_会清掉节点时间戳(db, video):
-    r = videos_mod.patch_mindmap(video.id, body(tree=SIMPLE_TREE, create_chapters=True), db)
-    target = [c for c in r["chapters"] if c["source_node_id"]][0]
-    res = videos_mod.delete_chapter(video.id, target["id"], db)
-    assert res["cleared_node_start"] is True
-    db.expire_all()
-    tree = db.query(MindMap).first().tree
-    assert mm.find_node(tree, target["source_node_id"])["start"] is None
-
-
-def test_删除原始章节_不碰导图(db, video):
-    videos_mod.patch_mindmap(video.id, body(tree=SIMPLE_TREE, create_chapters=True), db)
-    original = db.query(Chapter).filter(Chapter.source_node_id.is_(None)).first()
-    res = videos_mod.delete_chapter(video.id, original.id, db)
-    assert res["cleared_node_start"] is False
-    assert db.query(MindMap).first().tree["children"][0]["start"] == 10
 
 
 def test_删除不存在的章节报404(db, video):

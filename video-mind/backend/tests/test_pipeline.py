@@ -76,6 +76,27 @@ def test_normalize_chapters_首章从零开始_末章覆盖到结尾():
     assert out[-1]["end"] == 50.0
 
 
+def test_分章提示词带章节数锚点():
+    """只说「每 3-10 分钟一章」时模型要么切碎要么切粗，必须给具体数字做锚点。"""
+    # 20 分钟 -> 按每 5 分钟一章推算，建议 4 章
+    segs = [Segment(start=i * 30, end=(i + 1) * 30, text="内容") for i in range(40)]
+    prompt = chapter_mod._build_user_prompt(segs)
+    assert "建议章节数" in prompt
+    assert "约 4 章" in prompt
+
+    # 60 分钟 -> 约 12 章，锚点要跟着时长走
+    long_segs = [Segment(start=i * 30, end=(i + 1) * 30, text="内容") for i in range(120)]
+    assert "约 12 章" in chapter_mod._build_user_prompt(long_segs)
+
+
+def test_分章提示词要求先找话题转折():
+    """先定位话题转折点再切分（CoT），比直接让模型切分准确得多。"""
+    assert "topic_shifts" in chapter_mod.SYSTEM_PROMPT
+    assert "话题" in chapter_mod.SYSTEM_PROMPT
+    # 给模型一个草稿字段，但同时要说明它不会被使用，免得模型以为必须填
+    assert "不会被使用" in chapter_mod.SYSTEM_PROMPT
+
+
 def test_normalize_chapters_相邻章节首尾相接():
     segs = make_segments(8)
     raw = [
@@ -165,12 +186,17 @@ def test_normalize_tree_越界时间戳被钳位():
         "children": [{"label": "子", "start": -50}],
     }
     out = mindmap_mod.normalize_tree(tree, chapters)
-    assert 0 <= out["start"] <= 100
+    # 根有子节点 → 不持有自己的时间；越界的是子节点，它被钳进章节区间
+    assert out.get("start") is None
     assert 0 <= out["children"][0]["start"] <= 100
 
 
-def test_normalize_tree_空节点继承子节点时间():
-    """分类节点没有自己的时间点时，应继承子节点时间，避免「点了没反应」。"""
+def test_normalize_tree_分类节点不持有自己的时间():
+    """分类节点的时间就是它第一个子节点的时间，不该再存一份。
+
+    存一份会在大纲里和子节点并排显示同一个时间点（看着像重复数据），
+    章节同步时还会把父子俩都生成章节，区间直接交叉。
+    """
     chapters = [{"idx": 0, "title": "A", "start": 0, "end": 100, "summary": "", "key_points": []}]
     tree = {
         "label": "根",
@@ -178,7 +204,23 @@ def test_normalize_tree_空节点继承子节点时间():
         "children": [{"label": "子", "start": 42}],
     }
     out = mindmap_mod.normalize_tree(tree, chapters)
-    assert out["start"] == 42.0
+    assert out.get("start") is None
+    # 点击分类时靠 first_timed_descendant 找到跳转目标，仍然「点了有反应」
+    assert mindmap_mod.first_timed_descendant(out) == 42.0
+
+
+def test_enforce_time_order_同级时间戳互不相同():
+    """同级节点撞在同一个时间点时，后一个要被推开至少 MIN_TIME_STEP。"""
+    tree = {"label": "根", "children": [
+        {"label": "子1", "start": 30},
+        {"label": "子2", "start": 30},   # 与上一个撞了
+        {"label": "子3", "start": 10},   # 顺序还反了
+    ]}
+    mindmap_mod.enforce_time_order(tree)
+    starts = [c["start"] for c in tree["children"]]
+    assert starts == sorted(starts), f"同级未按时间排序: {starts}"
+    assert len(set(starts)) == len(starts), f"同级时间戳重复: {starts}"
+    assert starts[1] - starts[0] >= mindmap_mod.MIN_TIME_STEP
 
 
 def test_normalize_tree_限制深度与宽度():

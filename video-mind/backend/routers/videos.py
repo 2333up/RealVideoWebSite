@@ -478,6 +478,8 @@ def patch_chapter(
             setattr(c, field, val)
     _assert_valid_range(c, v.duration)
     db.commit()
+    normalize_chapter_ranges(db, video_id)
+    db.commit()
     return {"ok": True, "chapter": chapter_to_dict(c)}
 
 
@@ -518,6 +520,9 @@ def create_chapter(video_id: int, body: ChapterCreate, db: Session = Depends(get
     _assert_valid_range(c, v.duration)
     db.add(c)
     db.commit()
+    # 新建的这条会插进已有章节之间：全局重排一遍，保证区间不交叉
+    normalize_chapter_ranges(db, video_id)
+    db.commit()
     db.refresh(c)
     return chapter_to_dict(c)
 
@@ -533,6 +538,9 @@ def delete_chapter(video_id: int, chapter_id: int, db: Session = Depends(get_db)
     v, c = _video_and_chapter(db, video_id, chapter_id)
     node_id = c.source_node_id
     db.delete(c)
+    db.commit()
+    # 删掉一条后，前一条的终点还停在原处，会留下一段没人认领的缝隙
+    normalize_chapter_ranges(db, video_id)
     db.commit()
 
     cleared = False
@@ -568,6 +576,9 @@ def patch_mindmap(video_id: int, body: MindMapPatch, db: Session = Depends(get_d
 
     cleaned = clean_mindmap_tree(body.tree, v.duration)
     cleaned = mindmap_ops.ensure_node_ids(cleaned)
+    # 手工编辑同样要过一遍时间整理：用户完全可能把两个同级节点设成同一个时间，
+    # 或者给分类节点设了时间——这两件事都会让章节区间交叉。
+    mindmap_ops.enforce_time_order(cleaned)
 
     # 必须先留一份旧树：判断「这次有没有动过时间戳」靠它。
     # 覆盖之后再读就只剩新树，所有节点都会变成「新节点」，
@@ -582,10 +593,11 @@ def patch_mindmap(video_id: int, body: MindMapPatch, db: Session = Depends(get_d
         mm.tree = cleaned
     db.flush()
 
+    # 2026-10-17 起导图保存**不再**同步章节：分析完成后导图与章节一一对应，
+    # 之后的编辑（改名/加节点/挪时间）是两件独立的事，不要求保持对应。
+    # 以前这里会把树里的时间戳同步成章节，结果旧树盖回新树时章节成批复活，
+    # 「删除按钮没起作用」的体感一大半来自这里。
     created = updated = removed = 0
-    if body.create_chapters:
-        created, updated = sync_chapters_from_mindmap(db, v, cleaned, previous)
-        removed = drop_orphan_node_chapters(db, v, cleaned)
 
     db.commit()
     db.refresh(v)
@@ -711,6 +723,86 @@ def clean_mindmap_tree(raw: dict, duration: float) -> dict:
 _MISSING = object()
 
 
+def normalize_chapter_ranges(db: Session, video_id: int) -> int:
+    """把整张章节表重新切成互不交叉的区间，返回被调整过的条数。
+
+    这是「章节区间不得交叉」这条硬要求的最终兜底，任何改动过章节的入口
+    都要调一次（新建、编辑、删除、导图同步）。
+
+    为什么必须全局做一遍：
+        章节有两个来源——分析流程生成的粗粒度章节，和导图叶子节点同步来的
+        细粒度章节。两者的粒度天生不同，只想「自己那几条」的话，
+        新插入的一条会插进别人中间，前后章节的时间范围立刻重叠。
+        统一按 start 排序后「前一条的终点 = 后一条的起点」，
+        就把整张表变成一串严丝合缝的区间，无论来源。
+
+    两个刻意的「不做」：
+      - 只把终点**夹到**后一条的起点，不强行延伸到片尾。章节之间留一段
+        没人认领的时间是正常的（片尾字幕就不该算进任何一章），
+        要求「不交叉」，没要求「铺满」。
+      - 只有起点真撞车才推后，其余一律尊重用户/模型给的值。
+    """
+    video = db.get(Video, video_id)
+    if video is None:
+        return 0
+
+    chapters = sorted(
+        db.query(Chapter).filter(Chapter.video_id == video_id).all(),
+        key=lambda c: (c.start, c.idx, c.id),
+    )
+    if not chapters:
+        return 0
+
+    duration = float(video.duration) if video.duration else None
+    prev_start: float | None = None
+    changed = 0
+
+    for i, c in enumerate(chapters):
+        start = float(c.start)
+        if prev_start is not None and start <= prev_start:
+            start = prev_start + mindmap_ops.MIN_TIME_STEP
+        if abs(start - float(c.start)) > 1e-6:
+            c.start = round(start, 2)
+            changed += 1
+        prev_start = start
+
+    # idx 跟着时间走：章节列表按 idx 排序展示，idx 还停在「插入顺序」的话，
+    # 界面上会出现时间来回跳的假象，看起来就像「时间顺序乱了」。
+    #
+    # (video_id, idx) 上有唯一约束，直接原地重排会撞键：
+    # 把 3 号改成 1 的时候，1 还被 2 号占着。所以先整体挪到一个临时区间，
+    # flush 一次腾空位置，再落回真正的序号。
+    renumber = [c for c in chapters if any(c.idx != i for i, c in enumerate(chapters))]
+    if renumber:
+        offset = len(chapters) + 1
+        for i, c in enumerate(chapters):
+            c.idx = offset + i
+        db.flush()
+        for i, c in enumerate(chapters):
+            c.idx = i
+            changed += 1
+        db.flush()
+
+    for i, c in enumerate(chapters):
+        start = float(c.start)
+        end = float(c.end)
+        next_start = float(chapters[i + 1].start) if i + 1 < len(chapters) else None
+
+        # 终点不许越过下一条的起点——这是「不交叉」的全部含义
+        if next_start is not None and end > next_start:
+            end = next_start
+        if end <= start:
+            end = next_start if next_start is not None else (duration if duration else start + 1.0)
+        if end <= start:
+            end = start + 1.0
+
+        if abs(float(c.end) - end) > 1e-6:
+            c.end = round(end, 2)
+            changed += 1
+
+    return changed
+
+
 def sync_chapters_from_mindmap(
     db: Session, v: Video, tree: dict, previous: dict | None
 ) -> tuple[int, int]:
@@ -723,39 +815,79 @@ def sync_chapters_from_mindmap(
     十几条与已有章节重复的条目——这不是帮忙，是添乱。
 
     判定顺序：
-      - 上一次保存里没有这个节点（新节点）→ 建
+      - previous 为空（首次保存）→ 建全部带时间戳的节点
+      - 两棵树 id 大面积对不上（分叉）→ 只信 pinned，绝不批量建
       - 这个节点的时间戳这次被改了 → 建（或更新）
       - 用户显式点过「设置时间」→ 节点带 pinned 标记 → 建
       - 已经存在对应章节 → 始终同步标题与终点，保持跟随节点
 
     幂等性靠 source_node_id：章节按节点 id 认人，反复保存不会重复建。
+
+    分叉检测（后者正是本次事故）：
+        页面里还拿着旧树时点了重新分析，服务端会把导图重新生成（全新 id）；
+        用户随后保存手里的旧树，旧 id 对新树全部 _MISSING——
+        若把 _MISSING 一律当「用户新建节点」，一次保存就能凭空造出 26 条章节。
+        所以先比对新旧树的 id 重合度，重合度低于一半即判定为分叉，
+        分叉树上只有 pinned（用户显式意图）才有资格建章节。
     """
     timed = [(n, d) for n, _p, d in mindmap_ops.iter_nodes(tree) if n.get("start") is not None]
     timed.sort(key=lambda x: float(x[0]["start"]))
 
     prev_starts: dict[str, object] = {}
+    prev_ids: set[str] = set()
     if previous:
         for n, _p, _d in mindmap_ops.iter_nodes(previous):
+            nid = str(n.get("id"))
+            if nid:
+                prev_ids.add(nid)
             prev_starts[str(n.get("id"))] = n.get("start")
+
+    # 分叉检测：incoming 的 id 大半在旧树里找不到，就不是同一份树的演进
+    diverged = False
+    if previous:
+        incoming_ids = {
+            str(n.get("id"))
+            for n, _p, _d in mindmap_ops.iter_nodes(tree)
+            if n.get("id")
+        }
+        if incoming_ids and prev_ids:
+            overlap = len(incoming_ids & prev_ids) / len(incoming_ids)
+            diverged = overlap < 0.5
 
     by_node = {c.source_node_id: c for c in v.chapters if c.source_node_id}
     next_idx = _next_idx(db, v.id)
 
+    # 先把时间点排成严格递增、互不相同的一串，再按「下一条的起点」切区间。
+    # 顺序不能反过来：先用未去重的 start 算 end，两个节点撞在同一个时间点时
+    # 会算出 end == start 的零长区间，紧接着下一条又从同样的 start 开始——
+    # 前后章节的时间范围就交叉了。
+    starts: list[float] = []
+    for node, _depth in timed:
+        s = float(node["start"])
+        if starts and s <= starts[-1]:
+            s = starts[-1] + mindmap_ops.MIN_TIME_STEP
+        starts.append(round(s, 2))
+
+    duration = float(v.duration) if v.duration else None
+
     created = updated = 0
     for i, (node, _depth) in enumerate(timed):
-        start = float(node["start"])
-        end = (
-            float(timed[i + 1][0]["start"])
-            if i + 1 < len(timed)
-            else (float(v.duration) if v.duration else start + 1.0)
-        )
+        start = starts[i]
+        end = starts[i + 1] if i + 1 < len(starts) else (duration if duration else start + 1.0)
         if end <= start:
-            end = float(v.duration) if v.duration and v.duration > start else start + 1.0
+            end = duration if duration and duration > start else start + 1.0
         title = str(node.get("label") or "未命名节点")
 
         nid = str(node.get("id"))
         prev = prev_starts.get(nid, _MISSING)
-        touched = prev is _MISSING or prev != node.get("start") or bool(node.get("pinned"))
+        if diverged:
+            # 两棵树对不上号：只有用户显式 pin 过的节点才有资格建章节。
+            # 「id 没见过」在这种时候不是「新节点」，而是「树分叉了」。
+            touched = bool(node.get("pinned"))
+        else:
+            touched = prev is _MISSING or prev != node.get("start") or bool(
+                node.get("pinned")
+            )
 
         c = by_node.get(nid)
         if c is None:

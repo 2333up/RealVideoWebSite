@@ -73,7 +73,7 @@ def patch_llm(monkeypatch):
         return holder["instance"]
 
     monkeypatch.setattr(chapter_mod, "get_llm", factory)
-    monkeypatch.setattr(mindmap_mod, "get_llm", factory)
+    # 导图不再调用大模型（一章一节点的确定性构造），无需 mock
     return holder
 
 
@@ -151,14 +151,6 @@ def test_导图_时间戳全部落在视频时长内(segments, patch_llm):
         {"idx": 1, "title": "B", "start": 120, "end": 240, "summary": "s", "key_points": []},
         {"idx": 2, "title": "C", "start": 240, "end": 360, "summary": "s", "key_points": []},
     ]
-    payload = """
-    {"label": "课程主题", "start": 0, "children": [
-        {"label": "基础知识", "start": 5,   "children": [{"label": "概念A", "start": 10}]},
-        {"label": "进阶内容", "start": 999, "children": [{"label": "概念B", "start": -20}]},
-        {"label": "实战",     "start": null,"children": [{"label": "演示",  "start": 250}]}
-    ]}
-    """
-    patch_llm["instance"] = FakeLLM(mindmap_payload=payload)
     tree = mindmap_mod.build_mindmap(chapters, video_title="测试视频")
 
     def all_starts(node):
@@ -171,27 +163,28 @@ def test_导图_时间戳全部落在视频时长内(segments, patch_llm):
             assert 0 <= s <= 360, f"导图时间戳 {s} 超出视频时长范围"
 
 
-def test_导图_每个节点都可跳转(segments, patch_llm):
-    """分类节点没有时间点时继承子节点时间，保证「点哪都能跳」。"""
-    chapters = [{"idx": 0, "title": "A", "start": 0, "end": 60, "summary": "s", "key_points": []}]
-    payload = """
-    {"label": "根", "start": null, "children": [
-        {"label": "分类", "start": null, "children": [{"label": "叶子", "start": 30}]}
-    ]}
+def test_导图_节点与章节一一对应(segments, patch_llm):
+    """分析完成后，导图节点和章节必须一一对应——这是一一对应需求的根基。
+
+    以前这一步会再调一次 LLM 把章节重组成多层分类，节点和章节对不上号；
+    现在是确定性构造：根节点 = 视频标题，每个章节挂一个叶子。
     """
-    patch_llm["instance"] = FakeLLM(mindmap_payload=payload)
-    tree = mindmap_mod.build_mindmap(chapters)
+    chapters = [
+        {"idx": 0, "title": "开场", "start": 0, "end": 60, "summary": "s", "key_points": []},
+        {"idx": 1, "title": "主体", "start": 60, "end": 120, "summary": "s", "key_points": []},
+        {"idx": 2, "title": "收尾", "start": 120, "end": 180, "summary": "s", "key_points": []},
+    ]
+    tree = mindmap_mod.build_mindmap(chapters, video_title="测试视频")
 
-    def walk(node):
-        assert node.get("start") is not None, f"节点「{node['label']}」没有可跳转的时间点"
-        for c in node.get("children") or []:
-            walk(c)
+    assert tree["label"] == "测试视频"
+    kids = tree.get("children") or []
+    assert len(kids) == len(chapters), f"节点数 {len(kids)} != 章节数 {len(chapters)}"
+    for node, c in zip(kids, chapters):
+        assert node["label"] == c["title"], "节点标题必须与章节标题一致"
+        assert node["start"] == c["start"], "节点时间必须与章节起点一致"
+        assert not node.get("children"), "章节节点不该有下级，否则就不是一一对应"
 
-    walk(tree)
 
-
-def test_导图_根节点缺失时报错(patch_llm):
-    chapters = [{"idx": 0, "title": "A", "start": 0, "end": 60, "summary": "s", "key_points": []}]
-    patch_llm["instance"] = FakeLLM(mindmap_payload='{"children": []}')
+def test_导图_空章节报错(patch_llm):
     with pytest.raises(Exception):
-        mindmap_mod.build_mindmap(chapters)
+        mindmap_mod.build_mindmap([])
