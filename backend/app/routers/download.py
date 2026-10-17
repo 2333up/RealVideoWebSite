@@ -30,6 +30,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.ffmpeg import ffmpeg_available, merge_av
 from app.platforms.base import registry
+from app.platforms.bilibili.adapter import needs_merge
 from app.services import account_service
 
 logger = logging.getLogger(__name__)
@@ -70,10 +71,17 @@ async def bilibili_download(
     qn: int | None = Query(None, description="目标清晰度代码；不传则由平台决定"),
     db: Session = Depends(get_db),
 ):
-    """流式代理下载视频，返回带正确文件名的二进制流。
+    """下载 B 站视频，返回带正确文件名的二进制流。
 
-    直链来自 B 站 CDN，有 Referer + Cookie 防盗链，浏览器直接访问会 403。
-    这里由后端携带正确请求头转发，绕开防盗链（用户已登录时用登录态 Cookie）。
+    两条路径，由 adapter.needs_merge 一处判定，不在这里另算：
+      1. MP4 直链转发：目标档位不超过直链上限（一般 720P）时走这条。
+         直链来自 B 站 CDN，有 Referer + Cookie 防盗链，浏览器直接访问
+         会 403，故由后端带正确请求头转发。**不需要 ffmpeg。**
+      2. DASH 合并：1080P 及以上只提供音视频分离的两条流，必须先都下完
+         再用 ffmpeg 合并（见 _download_dash_merged）。**需要 ffmpeg。**
+
+    为什么 720P 明明有 DASH 流也不走合并：直链是现成的单文件，转发即可，
+    合并等于白白多下一次音频流 + 一次封装，慢且徒增依赖。
     """
     try:
         adapter = registry.get("bilibili")
@@ -89,13 +97,16 @@ async def bilibili_download(
         raise HTTPException(status_code=502, detail=f"获取下载地址失败: {exc}") from exc
 
     durl = info.get("durl") or []
-    # MP4 直链（fnval=1）清晰度上限 720P：目标档位高于它时，唯一可用的
-    # 是 DASH 的音视频分离流，必须下完再合并，否则要么拿不到、要么无声。
-    need_merge = (qn is not None and qn > (info.get("direct_quality") or 0)) or (
-        not durl and bool((info.get("dash") or {}).get("video"))
-    )
-    if need_merge:
+    # 判定只有一处定义（adapter.needs_merge）：目标档位不超过 MP4 直链的
+    # 上限就走直链，不需要 ffmpeg；超过才下 DASH 音视频再合并。
+    if needs_merge(qn, info.get("direct_quality") or 0, bool(durl)):
+        logger.info(
+            "B 站下载走 DASH 合并：bvid=%s qn=%s（MP4 直链上限 %s）",
+            bvid, qn, info.get("direct_quality"),
+        )
         return await _download_dash_merged(adapter, info, qn, creds)
+
+    logger.info("B 站下载走 MP4 直链：bvid=%s qn=%s（无需 ffmpeg 合并）", bvid, qn)
 
     if not durl:
         raise HTTPException(status_code=502, detail="未获取到可下载的播放直链（可能需登录或该视频不可下载）")

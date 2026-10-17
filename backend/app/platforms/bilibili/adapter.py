@@ -110,6 +110,29 @@ def to_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def needs_merge(qn: int | None, direct_quality: int, has_durl: bool = True) -> bool:
+    """判断某个清晰度是否必须走「下载 DASH 音视频 + ffmpeg 合并」。
+
+    依据（2026-10-17 实测）：B 站的 MP4 直链（fnval=1）清晰度上限就是
+    720P——响应里的 quality 即 direct_quality，再高的档位它给不出来。
+    1080P 及以上只存在于 DASH（fnval=16）中，且是音视频分离的两条流，
+    不合并的话要么下不到、要么有声无画。
+
+    于是判定只有一条主线：
+      目标档位不超过直链上限 → 走直链，秒下、不需要 ffmpeg
+      超过                  → 只能下 DASH 再合并
+      直链整个缺失          → 有 DASH 就合并，没有就没得下
+
+    :param qn: 目标清晰度代码；None 表示「没指定」，此时直接用现成直链，
+        不为拿更高画质去做无谓的合并。
+    """
+    if not has_durl:
+        return True
+    if qn is None:
+        return False
+    return qn > direct_quality
+
+
 class BilibiliAdapter(PlatformAdapter):
     key: ClassVar[str] = "bilibili"
     display_name: ClassVar[str] = "哔哩哔哩"
@@ -590,6 +613,7 @@ class BilibiliAdapter(PlatformAdapter):
 
         # 直链实际拿到的档位——高于它的档位只能靠 DASH 合并音视频
         direct_quality = direct.get("quality") or 0
+        has_durl = bool(direct.get("durl"))
 
         # 支持的清晰度列表（去重保序）。以 DASH 的为准：它的 support_formats
         # 才包含 1080P 及以上的档位，直链那份最多到 720P。
@@ -604,7 +628,7 @@ class BilibiliAdapter(PlatformAdapter):
                 "quality": q,
                 "desc": f.get("new_description") or f.get("display_desc") or str(q),
                 # 直链给不到的档位，必须下载 DASH 音视频再合并
-                "needs_merge": q > direct_quality,
+                "needs_merge": needs_merge(q, direct_quality, has_durl),
             })
         # 若 support_formats 为空，回退 durl 里的清晰度
         if not formats:
