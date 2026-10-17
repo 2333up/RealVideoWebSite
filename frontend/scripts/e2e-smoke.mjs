@@ -140,6 +140,22 @@ try {
   check('点开视频并渲染思维导图', false, openedTitle || '列表为空或点击失败')
 }
 
+// ================= D. 下载画质档位（MP4 直链上限 720P，1080P 需合并） =================
+// 另起一轮：B 段结尾已把浮层关掉，直接 goto 重置状态最干净
+console.log('\n[D] 下载画质档位')
+await page.goto(BASE + '/', { waitUntil: 'networkidle' })
+await page.getByRole('button', { name: 'Python教程' }).first().click()
+await page.waitForSelector('a[href*="bilibili.com/video/"]', { timeout: 30000 })
+await page.locator('a[href*="bilibili.com/video/"]').first().click()
+await page.waitForSelector('iframe', { timeout: 20000 })
+await page.getByRole('button', { name: /下载/ }).first().click()
+await page.waitForSelector('text=当前可下载清晰度', { timeout: 40000 })
+const q1080 = page.getByRole('button', { name: /1080P/ })
+const has1080 = (await q1080.count()) > 0
+const label1080 = has1080 ? (await q1080.first().innerText()).replace(/\s+/g, ' ') : ''
+check('下载弹窗出现 1080P（标「合并」）', has1080 && label1080.includes('合并'), label1080 || '未出现')
+check('1080P 档位可用（服务端有 ffmpeg）', has1080 ? await q1080.first().isEnabled() : false)
+
 console.log(failures === 0 ? '\n=== 全部通过 ===' : `\n=== ${failures} 项失败 ===`)
 // 不调 browser.close()：CDP 连接的另一端是后台任务里的浏览器，退出进程自然断开
 process.exit(failures === 0 ? 0 : 1)

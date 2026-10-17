@@ -257,6 +257,8 @@ export interface PlayurlPage {
 export interface PlayurlFormat {
   quality: number
   desc: string
+  /** true = 该档位 MP4 直链给不到，只能下 DASH 音视频再合并（需服务端 ffmpeg） */
+  needs_merge?: boolean
 }
 
 export interface PlayurlInfo {
@@ -269,6 +271,10 @@ export interface PlayurlInfo {
   quality_desc: string
   formats: PlayurlFormat[]
   durl: { url: string; size: number; length: number }[]
+  /** MP4 直链实际拿到的档位（通常 64=720P）；高于它的档位只能靠合并 */
+  direct_quality?: number
+  /** 服务端是否装了 ffmpeg——没装时高画质档位不可用 */
+  ffmpeg_available?: boolean
 }
 
 // ---------------------------------------------------------------- YouTube

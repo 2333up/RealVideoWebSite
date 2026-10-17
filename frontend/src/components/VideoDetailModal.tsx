@@ -228,6 +228,11 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
     window.location.href = api.bilibiliDownloadUrl(bvid, downloadCid, downloadQn)
   }
 
+  // 当前选中档位是否需要服务端合并（没手动选时以平台实际给的档位为准）。
+  // needs_merge = MP4 直链给不到该档位，只能下 DASH 音视频再合并。
+  const pickedQn = downloadQn ?? playurlInfo?.quality
+  const pickedNeedsMerge = !!playurlInfo?.formats.find((f) => f.quality === pickedQn)?.needs_merge
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
@@ -645,18 +650,34 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
                             downloadQn !== undefined
                               ? downloadQn === f.quality
                               : playurlInfo.quality === f.quality
+                          // 需要合并却没有 ffmpeg 的档位直接禁用，
+                          // 否则用户点下去只会拿到一个 400
+                          const blocked = !!f.needs_merge && !playurlInfo.ffmpeg_available
                           return (
                             <button
                               key={f.quality}
                               type="button"
+                              disabled={blocked}
+                              title={
+                                blocked
+                                  ? '服务端未检测到 ffmpeg，无法合并该档位'
+                                  : f.needs_merge
+                                    ? '该档位只有音视频分离的流，需服务端下载后合并'
+                                    : undefined
+                              }
                               onClick={() => void switchQuality(f.quality)}
                               className={`rounded-lg px-2.5 py-1 text-[11px] transition-colors ${
                                 active
                                   ? 'bg-bilibili text-white'
                                   : 'bg-white text-ink-600 hover:bg-slate-200'
-                              }`}
+                              } ${blocked ? 'cursor-not-allowed opacity-40 hover:bg-white' : ''}`}
                             >
                               {f.desc}
+                              {f.needs_merge ? (
+                                <span className={active ? 'ml-1 opacity-90' : 'ml-1 text-ink-400'}>
+                                  合并
+                                </span>
+                              ) : null}
                             </button>
                           )
                         })}
@@ -664,9 +685,15 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
                     </div>
                   ) : null}
                   <p className="mt-2 text-amber-600">
-                    ⚠ 清晰度上限取决于登录态（游客 480P，登录 1080P，大会员更高）；
-                    选了拿不到的档位会自动降级到可用的最高档。
+                    ⚠ 720P 及以下走 MP4 直链，点开即下；标「合并」的档位（1080P
+                    及以上）只有音视频分离的流，需服务端下载后用 ffmpeg 合并，请稍候。
+                    上限取决于登录态（游客 480P，登录 1080P，大会员更高）。
                   </p>
+                  {playurlInfo.ffmpeg_available === false ? (
+                    <p className="mt-1 text-amber-600">
+                      ⚠ 服务端未检测到 ffmpeg，标「合并」的高画质档位暂不可用。
+                    </p>
+                  ) : null}
                 </div>
 
                 <button
@@ -675,7 +702,7 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
                   className="btn-primary w-full !text-xs"
                   style={{ backgroundColor: accentColor }}
                 >
-                  开始下载（{playurlInfo.title || bvid}）
+                  {pickedNeedsMerge ? '开始下载（需服务端合并，请稍候）' : `开始下载（${playurlInfo.title || bvid}）`}
                 </button>
               </div>
             ) : ytStreams ? (
