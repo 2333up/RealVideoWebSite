@@ -10,12 +10,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import re
 from typing import Any, ClassVar
 
 from app.core.config import settings
+from app.core.ffmpeg import ffmpeg_available
 from app.platforms.base import (
     Author,
     ContentItem,
@@ -108,6 +110,29 @@ def to_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def needs_merge(qn: int | None, direct_quality: int, has_durl: bool = True) -> bool:
+    """判断某个清晰度是否必须走「下载 DASH 音视频 + ffmpeg 合并」。
+
+    依据（2026-10-17 实测）：B 站的 MP4 直链（fnval=1）清晰度上限就是
+    720P——响应里的 quality 即 direct_quality，再高的档位它给不出来。
+    1080P 及以上只存在于 DASH（fnval=16）中，且是音视频分离的两条流，
+    不合并的话要么下不到、要么有声无画。
+
+    于是判定只有一条主线：
+      目标档位不超过直链上限 → 走直链，秒下、不需要 ffmpeg
+      超过                  → 只能下 DASH 再合并
+      直链整个缺失          → 有 DASH 就合并，没有就没得下
+
+    :param qn: 目标清晰度代码；None 表示「没指定」，此时直接用现成直链，
+        不为拿更高画质去做无谓的合并。
+    """
+    if not has_durl:
+        return True
+    if qn is None:
+        return False
+    return qn > direct_quality
+
+
 class BilibiliAdapter(PlatformAdapter):
     key: ClassVar[str] = "bilibili"
     display_name: ClassVar[str] = "哔哩哔哩"
@@ -115,11 +140,16 @@ class BilibiliAdapter(PlatformAdapter):
     homepage: ClassVar[str] = "https://www.bilibili.com"
     supported_kinds: ClassVar[list[ContentKind]] = ["video", "article"]
     supports_login: ClassVar[bool] = True
+    # 搜索结果自带播放量，粉丝量可查 /x/relation/stat，故两项门槛都可实现
+    supports_thresholds: ClassVar[bool] = True
 
     # ============================================================ 搜索
     def __init__(self) -> None:
         self.client = BilibiliClient()
         self.login = BilibiliLogin(self.client)
+        # 作者粉丝数缓存：一次搜索会命中多个 UP 主，同一个 mid 反复查会拖慢检索。
+        # 粉丝数变化很慢，进程内缓存足够（数量大时整体丢弃，避免无界增长）。
+        self._follower_cache: dict[str, int | None] = {}
 
     async def aclose(self) -> None:
         """释放底层 HTTP 连接池。
@@ -133,8 +163,6 @@ class BilibiliAdapter(PlatformAdapter):
         self, params: SearchParams, credentials: dict[str, Any] | None = None
     ) -> list[ContentItem]:
         """并行下探视频与图文两路，再合并交付推荐引擎。"""
-        import asyncio
-
         tasks: list[tuple[ContentKind, Any]] = []
         for kind in params.kinds:
             if kind == "video":
@@ -155,7 +183,82 @@ class BilibiliAdapter(PlatformAdapter):
                 logger.warning("B 站 %s 检索失败: %s", kind, result)
                 continue
             items.extend(result)
-        return items
+        return await self._apply_thresholds(items, params)
+
+    # ------------------------------------------------------------ 互动量过滤
+    async def _apply_thresholds(
+        self, items: list[ContentItem], params: SearchParams
+    ) -> list[ContentItem]:
+        """按播放量 / 粉丝量下限过滤。
+
+        播放量搜索结果里就有，直接比即可。粉丝量必须额外查 UP 主的关系接口
+        （/x/relation/stat），因此只对**去重后的作者**并发请求，避免同一 UP 主
+        的多条内容把请求量放大数十倍。
+
+        一个刻意的兜底：若所有粉丝数都查不到（接口异常/风控），**跳过粉丝量
+        过滤**而不是把结果清空 —— 让「接口抽风」表现为少一层过滤，而不是
+        「你搜的东西不存在」。
+        """
+        min_views = params.min_views
+        min_followers = params.min_followers
+        if not min_views and not min_followers:
+            return items
+
+        result = items
+        if min_views:
+            result = [i for i in result if i.view_count >= min_views]
+            logger.info("B 站播放量过滤（≥%s）：%d → %d 条", min_views, len(items), len(result))
+
+        if min_followers:
+            mids = list({i.author.uid for i in result if i.author.uid})
+            counts = await asyncio.gather(
+                *[self._fetch_follower_count(m) for m in mids],
+                return_exceptions=True,
+            )
+            follower_of: dict[str, int | None] = {}
+            for mid, value in zip(mids, counts):
+                follower_of[mid] = None if isinstance(value, BaseException) else value
+
+            resolved = [c for c in follower_of.values() if c is not None]
+            if not resolved:
+                logger.warning(
+                    "B 站粉丝数全部查询失败，跳过粉丝量过滤以免结果被清空（%d 位作者）",
+                    len(mids),
+                )
+            else:
+                before = len(result)
+                kept: list[ContentItem] = []
+                for item in result:
+                    count = follower_of.get(item.author.uid)
+                    if count is None:
+                        continue
+                    item.extra["follower_count"] = count
+                    if count >= min_followers:
+                        kept.append(item)
+                result = kept
+                logger.info(
+                    "B 站粉丝量过滤（≥%s）：%d → %d 条", min_followers, before, len(result)
+                )
+
+        return result
+
+    async def _fetch_follower_count(self, mid: str) -> int | None:
+        """查单个 UP 主的粉丝数（/x/relation/stat）。失败返回 None 而非抛出。"""
+        cached = self._follower_cache.get(mid)
+        if cached is not None or mid in self._follower_cache:
+            return cached
+        try:
+            data = await self.client.request_json(
+                "GET", "/x/relation/stat", params={"vmid": mid}
+            )
+            count = int((data or {}).get("follower") or 0)
+        except Exception as exc:  # noqa: BLE001 - 单个作者查询失败不影响整体
+            logger.warning("查询 UP 主粉丝数失败（mid=%s）: %s", mid, exc)
+            count = None
+        if len(self._follower_cache) > 500:
+            self._follower_cache.clear()
+        self._follower_cache[mid] = count
+        return count
 
     def _pagerange(self, params: SearchParams) -> list[int]:
         """待抓取的页码列表，从 params.page 起向后取 params.pages 页。"""
@@ -419,7 +522,11 @@ class BilibiliAdapter(PlatformAdapter):
 
     # ============================================================ 播放地址 / 下载
     async def get_playurl(
-        self, uid: str, cid: int | None = None, credentials: dict[str, Any] | None = None
+        self,
+        uid: str,
+        cid: int | None = None,
+        credentials: dict[str, Any] | None = None,
+        qn: int | None = None,
     ) -> dict[str, Any]:
         """获取视频播放直链与分 P 信息，供下载使用。
 
@@ -429,9 +536,21 @@ class BilibiliAdapter(PlatformAdapter):
             "bvid": str, "aid": str, "title": str,
             "pages": [{"cid": int, "page": int, "part": str, "duration": int}],
             "current_cid": int, "quality": int, "quality_desc": str,
-            "formats": [{"quality": int, "desc": str}],
+            "formats": [{"quality": int, "desc": str, "needs_merge": bool}],
             "durl": [{"url": str, "size": int, "length": int}],
+            "dash": {"video": [{"quality": int, "url": str, "backup": [str]}],
+                     "audio": [{"url": str, "backup": [str]}]},
+            "direct_quality": int, "ffmpeg_available": bool,
           }
+
+        两套清晰度通道的含义（2026-10-17 实测）：
+          - durl / fnval=1 的 MP4 直链，能直接下载，但**上限 720P**
+          - dash / fnval=16 的音视频分离流，1080P 与更高只在这里下发，
+            必须下载后用 ffmpeg 合并（formats 里 needs_merge=True 标出）
+
+        :param qn: 请求的目标清晰度代码（取 support_formats 里的 quality）。
+            不传则用 80（1080P）——B 站会在权限不足时自动降级到可用的最高档，
+            因此「不传」永远能拿到东西；传了则尽力满足该档，拿不到会如实报错。
         """
         # 先解析 bvid/aid；playurl 需要 bvid 与 cid
         bvid = uid if not uid.isdigit() else ""
@@ -454,42 +573,96 @@ class BilibiliAdapter(PlatformAdapter):
             cid = cid_list[0] if cid_list else (view.get("cid") or 0)
 
         # playurl 需要 Referer 指向视频页 + 登录态。
-        # 关键参数：
-        #   - qn=80 请求 1080P（游客会自动降级到其最高可用，如 720P/480P）。
-        #     不能写 qn=127（8K）：无大会员时接口直接报 -400「请求错误」。
-        #   - fnval=1 返回 durl（FLV 直链，可下载）；fnval=16 返回 dash 流（分片）。
-        payload: dict[str, Any] = {
+        #
+        # 两套请求并行发，各取所需：
+        #   fnval=1  → durl：MP4 直链，能直接下载，但**清晰度上限就是 720P**
+        #   fnval=16 → dash：音视频分离流，1080P 及以上只在这里下发
+        # 只发 fnval=1 时 support_formats 里压根没有 1080P，用户会以为是
+        # 登录态没生效——其实是被直链格式卡住了。故两路都问，再合并呈现。
+        #
+        # qn：不传用 80（1080P）。不能写 127（8K），无大会员时接口直接报
+        # -400「请求错误」；取不到该档时接口自行降级，如实回报不伪造。
+        base_payload: dict[str, Any] = {
             "bvid": bvid,
             "cid": cid,
-            "qn": 80,
-            "fnval": 1,
+            "qn": int(qn) if qn else 80,
             "fnver": 0,
             "fourk": 1,
         }
-        try:
-            play = await self.client.request_json(
-                "GET", "/x/player/playurl", params=payload, credentials=credentials,
-            )
-        except BilibiliError as exc:
-            logger.warning("获取播放地址失败 %s: %s", uid, exc)
-            raise
+        direct, dash_resp = await asyncio.gather(
+            self.client.request_json(
+                "GET", "/x/player/playurl",
+                params={**base_payload, "fnval": 1}, credentials=credentials,
+            ),
+            self.client.request_json(
+                "GET", "/x/player/playurl",
+                params={**base_payload, "fnval": 16}, credentials=credentials,
+            ),
+            return_exceptions=True,
+        )
+        # 一路失败不算致命：还能用另一路降级提供下载
+        if isinstance(direct, BaseException) and isinstance(dash_resp, BaseException):
+            logger.warning("获取播放地址失败 %s: %s", uid, direct)
+            raise direct
+        if isinstance(direct, BaseException):
+            logger.warning("直链请求失败，仅提供 DASH 合并下载 %s: %s", uid, direct)
+            direct = {}
+        if isinstance(dash_resp, BaseException):
+            logger.warning("DASH 请求失败，仅提供直链下载 %s: %s", uid, dash_resp)
+            dash_resp = {}
 
-        # 支持的清晰度列表（去重保序）
+        # 直链实际拿到的档位——高于它的档位只能靠 DASH 合并音视频
+        direct_quality = direct.get("quality") or 0
+        has_durl = bool(direct.get("durl"))
+
+        # 支持的清晰度列表（去重保序）。以 DASH 的为准：它的 support_formats
+        # 才包含 1080P 及以上的档位，直链那份最多到 720P。
         formats: list[dict[str, Any]] = []
         seen_q: set[int] = set()
-        for f in play.get("support_formats") or []:
+        for f in (dash_resp or direct).get("support_formats") or []:
             q = f.get("quality")
             if q is None or q in seen_q:
                 continue
             seen_q.add(q)
-            formats.append({"quality": q, "desc": f.get("new_description") or f.get("display_desc") or str(q)})
+            formats.append({
+                "quality": q,
+                "desc": f.get("new_description") or f.get("display_desc") or str(q),
+                # 直链给不到的档位，必须下载 DASH 音视频再合并
+                "needs_merge": needs_merge(q, direct_quality, has_durl),
+            })
         # 若 support_formats 为空，回退 durl 里的清晰度
         if not formats:
-            for d in play.get("durl") or []:
+            for d in direct.get("durl") or []:
                 formats.append({
-                    "quality": play.get("quality") or 0,
-                    "desc": play.get("quality") and f"{play.get('quality')}P" or "默认",
+                    "quality": direct.get("quality") or 0,
+                    "desc": (direct.get("quality") and f"{direct.get('quality')}P") or "默认",
+                    "needs_merge": False,
                 })
+
+        # 实际拿到的清晰度（可能与请求的不同 —— 权限不足时会被降级）。
+        # 用 support_formats 里的描述把它翻译成人话，而不是甩一个裸数字给前端。
+        actual_q = direct.get("quality") or 0
+        desc_by_q = {f["quality"]: f["desc"] for f in formats}
+        quality_desc = desc_by_q.get(actual_q) or (f"{actual_q}P" if actual_q else "")
+
+        def _streams(items: list[dict[str, Any]], with_quality: bool) -> list[dict[str, Any]]:
+            """提取 DASH 流的直链（含备用域名，CDN 抽风时后端可自行回落）。"""
+            out: list[dict[str, Any]] = []
+            for it in items or []:
+                url = it.get("baseUrl") or ""
+                if not url:
+                    continue
+                entry: dict[str, Any] = {
+                    "url": url,
+                    "backup": [u for u in (it.get("backupUrl") or []) if u][:2],
+                    # 同一档位 B 站会下发多种编码（avc1=H.264 / hev1=H.265 /
+                    # av01=AV1），下载时要能挑出兼容性最好的那条
+                    "codecs": it.get("codecs") or "",
+                }
+                if with_quality:
+                    entry["quality"] = it.get("id") or it.get("quality") or 0
+                out.append(entry)
+            return out
 
         return {
             "bvid": bvid,
@@ -505,14 +678,22 @@ class BilibiliAdapter(PlatformAdapter):
                 for p in pages
             ],
             "current_cid": cid,
-            "quality": play.get("quality"),
-            "quality_desc": play.get("quality") and str(play.get("quality")) or "",
+            "quality": actual_q,
+            "quality_desc": quality_desc,
             "formats": formats,
+            # 直链（≤ direct_quality 的档位直接用它，无需 ffmpeg）
             "durl": [
                 {"url": d.get("url") or "", "size": d.get("size") or 0, "length": d.get("length") or 0}
-                for d in (play.get("durl") or [])
+                for d in (direct.get("durl") or [])
                 if d.get("url")
             ],
+            # DASH 分片（高于 direct_quality 的档位用它 + ffmpeg 合并）
+            "dash": {
+                "video": _streams((dash_resp.get("dash") or {}).get("video"), True),
+                "audio": _streams((dash_resp.get("dash") or {}).get("audio"), False),
+            },
+            "direct_quality": direct_quality,
+            "ffmpeg_available": ffmpeg_available(),
         }
 
     async def _fetch_tags(self, bvid: str) -> list[str]:
@@ -600,13 +781,17 @@ class BilibiliAdapter(PlatformAdapter):
     async def fetch_embed_html(
         self, bvid: str, credentials: dict[str, Any] | None = None
     ) -> str:
-        """抓取视频页 HTML 并注入净化样式。
+        """抓取视频页 HTML，以同源代理版本返回。
 
         为什么要走服务端代理而不是直接 iframe 站方页面：
-          1. 跨域 iframe 无法注入 CSS/JS（同源策略），就藏不掉推荐区
-          2. 我们保存在库里的 Cookie 也无法传给跨域 iframe，登录态会丢
-        代理成同源之后，两个问题一并解决：样式全局生效（连 JS 后续渲染的
-        推荐也会被隐藏），首屏与播放器都按登录态渲染。
+          1. 跨域 iframe 带不上库中保存的 Cookie，登录态会丢
+          2. 页面里的相对资源（CSS/JS/图片）会解析到我们的源而 404，
+             用 <base> 把基准指回站方域名才能正常加载
+
+        早先这里还注入过隐藏推荐区/头部的样式，并配一个 MutationObserver
+        脚本持续清扫动态渲染的节点。但 B 站视频页由客户端 JS 动态渲染，
+        SSR 首屏里那些容器都是空占位，注入的规则命中不了真实节点——
+        整套屏蔽逻辑已移除，页面按原样呈现。
         """
         await self.client._ensure_fingerprint()
         headers = {
@@ -620,154 +805,22 @@ class BilibiliAdapter(PlatformAdapter):
             f"https://www.bilibili.com/video/{bvid}", headers=headers, follow_redirects=True
         )
         resp.raise_for_status()
-        return self._inject_cleanup_css(resp.text)
-
-    # 需要隐藏的元素特征。SSR 首屏里推荐区是空的（Vue 的 <!----> 占位），
-    # 真实内容全部由客户端 JS 动态渲染，所以单靠 CSS 选择器命中不了，
-    # 必须由注入的 JS 配合 MutationObserver 持续清扫。
-    CLEANUP_JS = """
-<script id="lingoseek-cleanup-js">
-(function () {
-  // 关键词清单放宽：站方推荐容器的真实类名无法从 SSR 推断（首屏为空），
-  // 故改为「子串包含」而非精确匹配，覆盖 recommend / related / side / header 等变体。
-  // 实测 SSR 已能命中 .rec-list / .video-page-card-small / .right-container，此处兜底动态渲染。
-  var KEYWORDS = [
-    'recommend', 'related', 'side-bar', 'sidebar', 'side_bar',
-    'rec-list', 'video-page-card', 'right-container',
-    'bili-header', 'biliheader', 'mini-header', 'bili-video-card',
-    'feed-card', 'video-card-list', 'right-side', 'fixed-sidenav'
-  ];
-  var observer = null;
-  // 等级越高越激进：0=关键词命中，1=宽泛（含 card/feed/hot/rank），2=按几何位置扫右侧
-  var level = 0;
-  var WIDE = ['card', 'feed', 'hot', 'rank', 'guess', 'more', 'list'];
-
-  function text(el) {
-    return ((el.getAttribute && el.getAttribute('class')) || '') + ' ' +
-           ((el.getAttribute && el.getAttribute('id')) || '');
-  }
-
-  function match(el) {
-    var s = text(el).toLowerCase();
-    if (!s.trim()) return false;
-    for (var i = 0; i < KEYWORDS.length; i++) {
-      if (s.indexOf(KEYWORDS[i]) >= 0) return true;
-    }
-    if (level >= 1) {
-      for (var j = 0; j < WIDE.length; j++) {
-        if (s.indexOf(WIDE[j]) >= 0) return true;
-      }
-    }
-    return false;
-  }
-
-  // 几何兜底：隐藏明显位于主内容右侧的宽栏（推荐区通常固定在右列）
-  function matchByGeometry(el) {
-    if (level < 2) return false;
-    var r = el.getBoundingClientRect();
-    if (!r || r.width < 200) return false;
-    var vw = window.innerWidth || 1000;
-    return r.left > vw * 0.55 && r.height > 200;
-  }
-
-  // 供父页面调用：逐级加强过滤强度（同源 iframe 可直接访问 contentWindow）
-  window.__lingoseekEscalate = function () {
-    level = Math.min(level + 1, 2);
-    sweep();
-    return level;
-  };
-  window.__lingoseekLevel = function () { return level; };
-
-  // 统计已隐藏元素数并暴露给父页面，便于确认清扫是否真的生效
-  var stats = { hidden: 0, last: '' };
-  window.__lingoseekStats = stats;
-
-  function hide(el) {
-    if (!el || el.__lsHidden) return;
-    el.__lsHidden = true;
-    stats.hidden++;
-    stats.last = (el.getAttribute('class') || el.tagName).slice(0, 60);
-    el.style.setProperty('display', 'none', 'important');
-    el.style.setProperty('visibility', 'hidden', 'important');
-    // 右侧栏收起后，让主内容铺满整行（B 站用 grid 分栏）
-    var p = el.parentElement;
-    if (p) {
-      try {
-        p.style.setProperty('grid-template-columns', 'minmax(0, 1fr)', 'important');
-      } catch (e) { /* 忽略非 grid 容器 */ }
-    }
-  }
-
-  function sweep() {
-    if (!document.body) return;
-    var all = document.body.querySelectorAll('*');
-    for (var i = 0; i < all.length; i++) {
-      var el = all[i];
-      if (match(el) || matchByGeometry(el)) hide(el);
-    }
-  }
-
-  function boot() {
-    sweep();
-    try {
-      observer = new MutationObserver(sweep);
-      observer.observe(document.body, {
-        childList: true, subtree: true,
-        attributes: true, attributeFilter: ['class']
-      });
-    } catch (e) { /* 老浏览器降级为一次性清扫 */ }
-    // 兜底：延迟再扫几次，覆盖懒加载与异步渲染
-    [500, 1500, 3000].forEach(function (t) { setTimeout(sweep, t); });
-  }
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', boot);
-  } else {
-    boot();
-  }
-})();
-</script>
-"""
+        return self._inject_base(resp.text)
 
     @classmethod
-    def _inject_cleanup_css(cls, html: str) -> str:
-        """注入隐藏推荐区与站方头部的样式/脚本，并修正资源基准路径。"""
-        css = """
-<style id="lingoseek-cleanup">
-/* ============ 推荐区（真实容器，实测 SSR 命中） ============ */
-/* B 站视频页右侧推荐列表的真实容器是 .rec-list，内部是 .video-page-card-small；
-   .recommend-list-v1 只是空占位，命中它无用，故以下精确锁定真实节点。 */
-.rec-list, .rec-list * { display: none !important; visibility: hidden !important; }
-.video-page-card-small, .video-page-card-small * { display: none !important; visibility: hidden !important; }
-.recommend-list-v1, .recommend-list-v1 * { display: none !important; visibility: hidden !important; }
-/* 右侧栏整体（含 UP 主面板与推荐）。若只想藏推荐、保留 UP 主面板，
-   可去掉 .right-container 这一条，但用户要求「铺满、空白最少」，故整体收起。 */
-.right-container, .right-container-inner { display: none !important; }
-/* ============ 站方头部与频道导航 ============ */
-.bili-header__menu, .bili-header__menu * { display: none !important; visibility: hidden !important; }
-.biliMainHeader, #biliMainHeader, .bili-header, .bili-header__bar,
-.header-channel, .bili-header__channel { display: none !important; }
-/* ============ 左侧主内容铺满，去掉右侧栏留下的空隙 ============ */
-.video-container-v1, .video-container, .video-page-container, .video-info-container {
-    grid-template-columns: minmax(0, 1fr) !important;
-    max-width: none !important;
-}
-.left-container { max-width: none !important; }
-/* 去掉因隐藏头部而残留的顶部留白 */
-body { padding-top: 0 !important; }
-#app, .bili-video-card { margin-top: 0 !important; }
-</style>
-"""
-        # 资源仍从站方域名加载，故保留原站为基准路径
+    def _inject_base(cls, html: str) -> str:
+        """修正资源基准路径，其余不做任何改动。
+
+        页面经同源代理返回后，相对 URL（/static/... 等）会解析到本站而 404，
+        故注入 <base> 指回站方域名。不做页面净化：见 fetch_embed_html 的说明，
+        B 站页面动态渲染，服务端注入的隐藏规则命中不了真实节点。
+        """
         base = '<base href="https://www.bilibili.com/">'
-        payload = f"{base}{css}{cls.CLEANUP_JS}"
         if "<head>" in html:
-            html = html.replace("<head>", f"<head>{payload}", 1)
-        elif "<HEAD>" in html:
-            html = html.replace("<HEAD>", f"<HEAD>{payload}", 1)
-        else:
-            html = payload + html
-        return html
+            return html.replace("<head>", f"<head>{base}", 1)
+        if "<HEAD>" in html:
+            return html.replace("<HEAD>", f"<HEAD>{base}", 1)
+        return base + html
 
     # ============================================================ 登录
     async def start_login(self) -> LoginTicket:

@@ -3,7 +3,8 @@
  * 这两个错在浏览器里表现为「方框叠在一起」「整张图偏上」，很难一眼定位，
  * 所以在这里用几何断言直接卡住。
  *
- * 用法：node scripts/check-layout.mjs
+ * 融合后端到 frontend/scripts/ 下运行：node scripts/check-layout.mjs
+ * （相对路径按 frontend/ 解析，源码在 src/videomind/lib/mindmapLayout.ts）
  */
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -17,7 +18,7 @@ execFileSync(
   process.execPath,
   [
     join('node_modules', 'esbuild', 'bin', 'esbuild'),
-    'src/lib/mindmapLayout.ts',
+    'src/videomind/lib/mindmapLayout.ts',
     '--format=esm',
     `--outfile=${out}`,
     '--log-level=error',

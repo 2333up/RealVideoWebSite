@@ -16,7 +16,11 @@ import type {
   VideoSummary,
 } from './types'
 
-const BASE = '/api'
+// 融合为单一前端应用后，video-mind 与 lingoSeek 同源同端口（同一个 5173），
+// 由 vite 代理把 /videomind/api 原样转发到 8000 后端的子应用挂载点。
+// 必须带 /videomind 前缀：去掉后会打到 lingoSeek 自己的 /api 上，表现为
+// 「页面能打开但所有接口 404」。部署到其他前缀时可用环境变量覆盖。
+const BASE = import.meta.env.VITE_VIDEOMIND_API_BASE ?? '/videomind/api'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(BASE + path, {

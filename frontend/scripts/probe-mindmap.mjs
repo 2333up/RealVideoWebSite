@@ -6,16 +6,45 @@
  * 下方兄弟节点的上边缘（节点间距 12px，工具条占 4~26px）。
  * 静态审查看不出来，只有真的把鼠标放在那个位置问「这个点上是谁」才能发现。
  *
+ * 融合后适配（原版跑在独立的 smoke.html 上，那页没入库）：
+ *  - 入口改为合并后的应用 http://127.0.0.1:5173/videomind/，
+ *    脚本会自己在左侧列表里点开第一支「已完成」的视频；
+ *  - 跳转日志原来由 smoke.html 的 mock 播放器写 window.__log.seek，
+ *    现在改用 page.addInitScript 给 HTMLMediaElement.prototype.currentTime
+ *    的 setter 打补丁，记录每一次赋值——等价于「播放器收到了跳转请求」，
+ *    且不受 seeking 事件在重复时间点上可能不触发的影响。
+ *
+ * 前置条件：
+ *  - 后端（:8000）与前端 dev server（:5173）都在跑；
+ *  - 库里至少有一支已分析（有思维导图）的视频，且它的源文件还在原处——
+ *    播放器要拿到 metadata 才会执行跳转。
+ *
  * 用法：NODE_PATH=<workspace>/node_modules node frontend/scripts/probe-mindmap.mjs
  */
 import { createRequire } from 'node:module'
+import { existsSync } from 'node:fs'
 
 const WORKSPACE = 'C:/Users/momo/.workbuddy/binaries/node/workspace/node_modules'
 const require = createRequire(WORKSPACE + '/')
 const { chromium } = require('playwright-core')
 
-const EXECUTABLE =
-  'C:/Users/momo/AppData/Local/ms-playwright/chromium-1243/chrome-win64/chrome.exe'
+/**
+ * 浏览器可执行文件：环境变量 PROBE_CHROME 优先，
+ * 否则用候选列表里第一个存在的。原脚本写死了作者机器上 playwright 下载的
+ * chromium；Edge 同为 Chromium 内核，playwright-core 可以直接驱动，
+ * 换机器时不必再下一遍浏览器。
+ */
+const CHROME_CANDIDATES = [
+  process.env.PROBE_CHROME,
+  'C:/Users/momo/AppData/Local/ms-playwright/chromium-1243/chrome-win64/chrome.exe',
+  'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+].filter(Boolean)
+const EXECUTABLE = CHROME_CANDIDATES.find((p) => existsSync(p))
+if (!EXECUTABLE) {
+  console.log(`找不到可用的 Chromium 内核浏览器，试过：\n${CHROME_CANDIDATES.join('\n')}`)
+  process.exit(1)
+}
 
 let failures = 0
 function check(name, ok, detail = '') {
@@ -25,7 +54,68 @@ function check(name, ok, detail = '') {
 
 const browser = await chromium.launch({ executablePath: EXECUTABLE })
 const page = await browser.newPage({ viewport: { width: 1000, height: 800 } })
-await page.goto('http://127.0.0.1:5273/smoke.html', { waitUntil: 'networkidle' })
+
+// 跳转日志：记录每一次 currentTime 赋值。React 的状态更新是异步的，
+// 赋值发生在点击之后的某个微任务里，所以读取前都要等它落定。
+await page.addInitScript(() => {
+  window.__log = { seek: [] }
+  const desc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'currentTime')
+  Object.defineProperty(HTMLMediaElement.prototype, 'currentTime', {
+    ...desc,
+    set(v) {
+      window.__log.seek.push(v)
+      desc.set.call(this, v)
+    },
+  })
+})
+
+/** 等跳转日志至少攒到 n 条（React 提交需要时间），超时返回当前条数 */
+async function waitSeekCount(n, timeout = 2000) {
+  const t0 = Date.now()
+  for (;;) {
+    const count = await page.evaluate(() => window.__log.seek.length)
+    if (count >= n || Date.now() - t0 > timeout) return count
+    await page.waitForTimeout(100)
+  }
+}
+
+/**
+ * 在左侧列表里点开一支视频，等导图渲染出来。
+ * 刷新会丢掉 React 里的 selectedId，页面回到列表——所以每次 reload 之后
+ * 都要靠这个函数把同一支视频重新打开（按标题认人）。
+ */
+async function openVideo(title) {
+  await page.evaluate((t) => {
+    const rows = [...document.querySelectorAll('aside div.cursor-pointer')]
+    const row =
+      rows.find((r) => (r.querySelector('.truncate')?.textContent ?? '').includes(t)) ??
+      rows.find((r) => r.textContent.includes('已完成')) ??
+      rows[0]
+    row?.click()
+  }, title)
+  await page.waitForSelector('.react-flow__node', { timeout: 15000 })
+  await page.waitForTimeout(600)
+}
+
+await page.goto('http://127.0.0.1:5173/videomind/', { waitUntil: 'networkidle' })
+
+// 自己点开一支视频：合并后的应用没有按 URL 选视频的路由，
+// 左侧列表第一行点下去才会加载详情、渲染导图。优先挑「已完成」的。
+const opened = await page.evaluate(() => {
+  const rows = [...document.querySelectorAll('aside div.cursor-pointer')]
+  const row = rows.find((r) => r.textContent.includes('已完成')) ?? rows[0]
+  if (!row) return null
+  const title = row.querySelector('.truncate')?.textContent ?? ''
+  row.click()
+  return title
+})
+if (!opened) {
+  console.log('左侧视频列表是空的——先导入并分析一支视频再跑本脚本')
+  await browser.close()
+  process.exit(1)
+}
+console.log(`已打开视频：${opened}`)
+
 await page.waitForSelector('.react-flow__node', { timeout: 15000 })
 await page.waitForTimeout(600)
 
@@ -93,10 +183,12 @@ if (!target) {
   const box = await page.locator(`.react-flow__node[data-id="${target.id}"]`).boundingBox()
   // 故意点上边缘：正是被工具条压住的那块区域
   await page.mouse.click(box.x + box.width / 2, box.y + 3)
+  await waitSeekCount(1)
   const seekTop = await page.evaluate(() => window.__log.seek.slice())
   check('点击节点上边缘能触发跳转', seekTop.length === 1, `seek=${JSON.stringify(seekTop)}`)
 
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+  await waitSeekCount(2)
   const seekMid = await page.evaluate(() => window.__log.seek.slice())
   check('点击节点中心能触发跳转', seekMid.length === 2, `seek=${JSON.stringify(seekMid)}`)
 }
@@ -192,8 +284,7 @@ if (target) {
   check('出现过手动摆放后，「整理」按钮才出现', hasResetBtn === 1)
 
   await page.reload({ waitUntil: 'networkidle' })
-  await page.waitForSelector('.react-flow__node', { timeout: 15000 })
-  await page.waitForTimeout(600)
+  await openVideo(opened)
   const afterReload = await readTransform(target.id)
   check('刷新后手动摆放的位置仍然保留', afterReload === moved, `${moved} vs ${afterReload}`)
 
@@ -272,8 +363,7 @@ if (!empty) {
 
     // 整组的新位置也要能存住：只记被拖那一个的话，其余节点刷新后就弹回去了
     await page.reload({ waitUntil: 'networkidle' })
-    await page.waitForSelector('.react-flow__node', { timeout: 15000 })
-    await page.waitForTimeout(600)
+    await openVideo(opened)
     const afterReload = await readAll()
     const kept = afterReload.filter((a, i) => a.t === after[i].t).length
     check(

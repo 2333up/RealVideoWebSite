@@ -66,6 +66,10 @@ export interface SearchPayload {
   order: SearchOrder
   duration_min?: number | null
   duration_max?: number | null
+  /** 播放量下限；平台拿不到播放量时会忽略 */
+  min_views?: number | null
+  /** 作者粉丝量下限；平台查不到粉丝数时会忽略 */
+  min_followers?: number | null
   account_id?: number | null
 }
 
@@ -78,6 +82,8 @@ export interface PlatformMeta {
   supports_login: boolean
   // 支持手动粘贴 Cookie 接入（如抖音无可行扫码流程）
   manual_credential?: boolean
+  // 支持「播放量 / 粉丝量」下限过滤；不支持的平台应隐藏这类筛选项
+  supports_thresholds?: boolean
 }
 
 export interface AccountBrief {
@@ -158,12 +164,23 @@ export const api = {
         `&page=${page}&page_size=${pageSize}&sort=${sort}`,
     ),
 
-  /** 获取 B 站视频播放直链信息（分 P + 清晰度），供下载 */
-  fetchPlayurl: (bvid: string, cid?: number) =>
+  /** 获取 B 站视频播放直链信息（分 P + 清晰度），供下载。
+   *  qn 为目标清晰度代码（取自 formats[].quality），不传则由平台决定。 */
+  fetchPlayurl: (bvid: string, cid?: number, qn?: number) =>
     request<PlayurlInfo>(
       `/platforms/bilibili/playurl?bvid=${encodeURIComponent(bvid)}` +
-        (cid ? `&cid=${cid}` : ''),
+        (cid ? `&cid=${cid}` : '') +
+        (qn ? `&qn=${qn}` : ''),
     ),
+
+  /**
+   * B 站下载直链（走后端代理：直链有 Referer + Cookie 防盗链，前端直下会 403）。
+   * qn 不传则由平台决定清晰度。
+   */
+  bilibiliDownloadUrl: (bvid: string, cid?: number, qn?: number) =>
+    `/api/platforms/bilibili/download?bvid=${encodeURIComponent(bvid)}` +
+    (cid ? `&cid=${cid}` : '') +
+    (qn ? `&qn=${qn}` : ''),
 
   /** 获取 YouTube 视频可下载流列表（清晰度 / 是否含音轨） */
   fetchYoutubeStreams: (videoId: string) =>
@@ -240,6 +257,8 @@ export interface PlayurlPage {
 export interface PlayurlFormat {
   quality: number
   desc: string
+  /** true = 该档位 MP4 直链给不到，只能下 DASH 音视频再合并（需服务端 ffmpeg） */
+  needs_merge?: boolean
 }
 
 export interface PlayurlInfo {
@@ -252,6 +271,10 @@ export interface PlayurlInfo {
   quality_desc: string
   formats: PlayurlFormat[]
   durl: { url: string; size: number; length: number }[]
+  /** MP4 直链实际拿到的档位（通常 64=720P）；高于它的档位只能靠合并 */
+  direct_quality?: number
+  /** 服务端是否装了 ffmpeg——没装时高画质档位不可用 */
+  ffmpeg_available?: boolean
 }
 
 // ---------------------------------------------------------------- YouTube

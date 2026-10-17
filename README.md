@@ -147,17 +147,30 @@ RealVideoWebSite/
 │   │   ├── schemas/api.py           # API 契约
 │   │   └── services/                # 账号增删改查与登录态体检
 │   └── data/app.db                  # SQLite（首次运行自动生成）
-├── frontend/
+├── frontend/                        # 统一前端（唯一的前端服务）
 │   ├── src/
-│   │   ├── App.tsx                  # 主界面
-│   │   ├── api/client.ts            # API 客户端与格式化工具
+│   │   ├── App.tsx                  # 路由分发：/ → 灵搜，/videomind/* → video-mind
+│   │   ├── LingoSeekApp.tsx         # 灵搜主界面
+│   │   ├── api/client.ts            # 灵搜 API 客户端
+│   │   ├── videomind/               # video-mind 全部源码（原独立工程）
+│   │   │   ├── VideoMindApp.tsx     #   video-mind 应用根组件
+│   │   │   ├── api.ts               #   API 客户端（基地址 /videomind/api）
+│   │   │   ├── components/          #   VideoPlayer / MindMap / ChapterList …
+│   │   │   └── lib/                 #   mindmapLayout / seekRequest
 │   │   └── components/
 │   │       ├── ResultCard.tsx       # 结果卡片 + 评分解释
 │   │       ├── LoginModal.tsx       # 扫码登录浮窗
 │   │       └── AccountPanel.tsx     # 账号管理抽屉
-│   └── vite.config.ts               # /api 反向代理到 :8000
+│   └── vite.config.ts               # /api 与 /videomind/api 反向代理到 :8000
+├── video-mind/
+│   └── backend/                     # video-mind 后端（由主后端挂载到 /videomind）
 └── start.bat                        # 一键启动
 ```
+
+> **服务拓扑**：全仓只有一个前端服务（:5173）和一个后端服务（:8000）。
+> 浏览器访问 <http://127.0.0.1:5173> 是灵搜；
+> <http://127.0.0.1:5173/videomind/> 是 video-mind（本地视频分章节 + 思维导图），
+> 两者在同一页面内互相跳转。
 
 ---
 

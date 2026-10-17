@@ -1,4 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
+// ReactFlow 的基础布局样式（节点定位、边、缩放控件）。融合后由这里引入，
+// 不再有独立的 main.tsx 负责。
+import '@xyflow/react/dist/style.css'
 import { api } from './api'
 import type {
   Chapter,
@@ -400,10 +404,19 @@ export default function App() {
   // ---------------------------------------------------------------- 渲染
 
   return (
-    <div className="h-full flex flex-col">
+    // vm-root：见 videomind.css，把原 body 的配色与字体收敛到这里，
+    // 避免和 lingoSeek 路由的全局样式互相覆盖。
+    <div className="vm-root h-full flex flex-col">
       {/* 顶栏 */}
       <header className="bg-white border-b border-gray-200 px-4 py-2.5 flex items-center shrink-0">
         <div className="flex items-center gap-2">
+          <Link
+            to="/"
+            className="text-[11px] text-gray-400 hover:text-blue-600 transition-colors"
+            title="返回灵搜 LingoSeek 视频搜索"
+          >
+            ← 灵搜
+          </Link>
           <span className="text-base font-semibold text-gray-900">video-mind</span>
           <span className="text-[11px] text-gray-400">本地视频 · 章节 · 思维导图</span>
         </div>

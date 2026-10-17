@@ -22,26 +22,24 @@ interface Props {
 /**
  * 视频详情浮层。
  *
- * 屏蔽推荐的思路：不嵌入 www.bilibili.com 的视频页（那个页面通篇是推荐流），
- * 而是——
- *   1. 播放器只用官方 embed 域名 player.bilibili.com（无侧边推荐栏）
- *   2. 标题/UP主/数据/简介等全部由我们调接口后自行渲染
- * 于是推荐内容根本没有落脚点。
+ * 两种视图：
+ *   - 站内页（embed）：服务端代理的 B 站原页面，自带评论区，按原样呈现。
+ *     实测（2026-10-17）：页面加载约 2-4s 后，B 站的反嵌入脚本会把 iframe
+ *     导航到真实域名 www.bilibili.com（帧树可证），此后为游客态、推荐栏全在，
+ *     登录态与任何服务端注入到那一刻全部失效——所以既不做也无从做屏蔽，
+ *     要稳定无推荐的体验请用纯净版。
+ *   - 纯净版（clean）：播放器只用官方 embed 域名 player.bilibili.com
+ *     （无侧边推荐栏），标题/UP主/数据/简介等全部由我们调接口后自行渲染，
+ *     推荐内容根本没有落脚点
  */
 export default function VideoDetailModal({ platform, uid, accentColor, fallback, onClose }: Props) {
   const [detail, setDetail] = useState<ContentCard | null>(fallback)
   const [loading, setLoading] = useState(!fallback)
   const [error, setError] = useState('')
   const panelRef = useRef<HTMLDivElement>(null)
-  const iframeRef = useRef<HTMLIFrameElement>(null)
-  // embed = 代理后的站方页面（自带评论区，已隐藏推荐）
+  // embed = 代理后的站方页面（自带评论区，按原样呈现）
   // clean = 播放器 + 我们自绘的详情与评论（无站方页面，最干净）
   const [viewMode, setViewMode] = useState<'embed' | 'clean'>('embed')
-  // 过滤强度：站方推荐容器的真实类名无法从服务端推断，
-  // 故提供逐级加强的按钮，让用户按实际效果推进
-  const [filterLevel, setFilterLevel] = useState(0)
-  // 已隐藏元素计数：由 iframe 内清扫脚本通过 __lingoseekStats 上报，用于确认净化是否真的生效
-  const [hiddenCount, setHiddenCount] = useState(0)
 
   const isVideo = detail?.kind === 'video'
   const bvid = (detail?.extra?.bvid as string | undefined) ?? ''
@@ -53,10 +51,10 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
   const isYoutube = platform === 'youtube'
   // YouTube 视频 ID：详情到位后用详情的 uid，否则退回列表传入的 uid
   const ytId = isYoutube ? detail?.uid || uid : ''
-  // YouTube 官方 embed（隐私增强域名）。
-  // 注意：这是唯一一处由浏览器直连站方的播放器 —— 服务端能访问 YouTube 不代表
-  // 浏览器也能，浏览器不可达时会是空白框，故下面同时给出「在 YouTube 打开」入口。
-  const ytEmbedSrc = ytId ? `https://www.youtube-nocookie.com/embed/${ytId}` : ''
+  // YouTube 原页面：**必须走后端代理**，不能 iframe 站方地址 —— /watch 带
+  // X-Frame-Options: SAMEORIGIN，跨域嵌入会被浏览器直接拒绝，只得到空白框。
+  // 代理后同源返回，页面里的 XHR 也由后端的资源代理转发，播放器才能取到数据。
+  const ytEmbedSrc = ytId ? `/api/platforms/youtube/embed?video_id=${ytId}` : ''
 
   // 下载弹窗状态
   const [showDownload, setShowDownload] = useState(false)
@@ -66,9 +64,11 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
   const [downloadLoading, setDownloadLoading] = useState(false)
   const [downloadError, setDownloadError] = useState('')
   const [downloadCid, setDownloadCid] = useState<number | undefined>(undefined)
+  // B 站目标清晰度（qn）。不传时平台自行决定，选定后下载与切分 P 都带上它
+  const [downloadQn, setDownloadQn] = useState<number | undefined>(undefined)
 
   // 走服务端代理而非直接 iframe 站方页面：
-  // 同源后注入的 CSS 才能生效（藏掉推荐区），且能带上库中保存的登录态。
+  // 同源后才能带上库中保存的登录态 Cookie，页面里的相对资源也才能正常加载。
   const embedSrc =
     platform === 'bilibili' && bvid
       ? `/api/platforms/bilibili/embed?bvid=${encodeURIComponent(bvid)}`
@@ -146,27 +146,6 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
     }
   }, [handleKey])
 
-  // 读取 iframe 内部清扫脚本上报的隐藏数量，用于确认净化是否真的生效
-  useEffect(() => {
-    if (viewMode !== 'embed' || !embedSrc) return
-    const timer = window.setInterval(() => {
-      const win = iframeRef.current?.contentWindow as
-        | (Window & { __lingoseekStats?: { hidden: number } })
-        | undefined
-      if (win?.__lingoseekStats) setHiddenCount(win.__lingoseekStats.hidden)
-    }, 1200)
-    return () => window.clearInterval(timer)
-  }, [viewMode, embedSrc])
-
-  const escalateFilter = () => {
-    const win = iframeRef.current?.contentWindow as
-      | (Window & { __lingoseekEscalate?: () => number })
-      | undefined
-    if (win && typeof win.__lingoseekEscalate === 'function') {
-      setFilterLevel(win.__lingoseekEscalate())
-    }
-  }
-
   // 打开下载弹窗：B 站拉播放直链（分 P + 清晰度），YouTube 拉可下载流列表
   const openDownload = async () => {
     if (isYoutube) {
@@ -193,6 +172,7 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
     setDownloadLoading(true)
     setDownloadError('')
     setPlayurlInfo(null)
+    setDownloadQn(undefined)
     try {
       const info = await api.fetchPlayurl(bvid)
       setPlayurlInfo(info)
@@ -204,20 +184,30 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
     }
   }
 
-  // 切换分 P：重新拉取该 cid 的播放地址
+  // 切换分 P：重新拉取该 cid 的播放地址（保持已选清晰度）
   const switchCid = async (cid: number) => {
     if (!bvid) return
     setDownloadCid(cid)
     setDownloadLoading(true)
     setDownloadError('')
     try {
-      const info = await api.fetchPlayurl(bvid, cid)
+      const info = await api.fetchPlayurl(bvid, cid, downloadQn)
       setPlayurlInfo(info)
     } catch (err) {
       setDownloadError(err instanceof Error ? err.message : '获取下载信息失败')
     } finally {
       setDownloadLoading(false)
     }
+  }
+
+  // 切换清晰度只改状态，不再重新请求 playurl。
+  //
+  // 以前必须重新请求，是因为直链（durl）与 qn 一一对应，沿用旧的会下到
+  // 原来那一档。现在后端一次就把全部档位交齐了：formats 列表 + DASH 各档
+  // 的流地址都在第一次响应里，真正的下载地址由下载接口在点击时按 qn 现取。
+  // 于是这里零网络往返——切换是瞬时的，也不再有「切一次卡一下」的等待。
+  const switchQuality = (qn: number) => {
+    setDownloadQn(qn)
   }
 
   // 触发下载：走后端代理（B 站直链有防盗链，YouTube 直链绑定 IP 且浏览器常不可达）
@@ -228,10 +218,15 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
       return
     }
     if (!bvid) return
-    const url = `/api/platforms/bilibili/download?bvid=${encodeURIComponent(bvid)}` +
-      (downloadCid ? `&cid=${downloadCid}` : '')
-    window.location.href = url
+    window.location.href = api.bilibiliDownloadUrl(bvid, downloadCid, downloadQn)
   }
+
+  // 当前选中档位是否需要服务端合并（没手动选时以平台实际给的档位为准）。
+  // needs_merge = MP4 直链给不到该档位，只能下 DASH 音视频再合并。
+  const pickedQn = downloadQn ?? playurlInfo?.quality
+  const pickedFormat = playurlInfo?.formats.find((f) => f.quality === pickedQn)
+  const pickedNeedsMerge = !!pickedFormat?.needs_merge
+  const pickedDesc = pickedFormat?.desc
 
   return (
     <div
@@ -330,26 +325,24 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
                 服务端能访问 YouTube 不代表浏览器也能，所以下面还要保留
                 「在 YouTube 打开」入口作为兜底。 */}
             {isYoutube && ytEmbedSrc ? (
-              <div className="aspect-video w-full bg-black">
+              <div className="h-[62vh] min-h-[380px] w-full bg-black">
                 <iframe
                   src={ytEmbedSrc}
-                  title={detail?.title || 'YouTube 视频'}
+                  title={detail?.title || 'YouTube 原页面'}
                   className="h-full w-full"
                   frameBorder="0"
                   allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                   allowFullScreen
-                  referrerPolicy="no-referrer"
                 />
               </div>
             ) : null}
-            {/* ---- 视图片：站内页（代理后同源，已隐藏推荐与头部）---- */}
+            {/* ---- 视图片：站内页（代理后同源，带登录态，按原样呈现）---- */}
             {isVideo ? (
               viewMode === 'embed' && embedSrc ? (
                 <>
-                  {/* 播放器铺满视口剩余空间：减去顶部 header 与底部状态栏 */}
-                  <div className="h-[calc(100vh-76px)] min-h-[360px] w-full bg-black">
+                  {/* 播放器铺满视口剩余空间：减去顶部 header */}
+                  <div className="h-[calc(100vh-48px)] min-h-[360px] w-full bg-black">
                     <iframe
-                      ref={iframeRef}
                       src={embedSrc}
                       title={detail?.title || '视频页面'}
                       className="h-full w-full"
@@ -359,31 +352,6 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
                       // 不含 allow-top-navigation：阻止站方脚本破框跳转
                       sandbox="allow-scripts allow-same-origin allow-popups allow-forms allow-presentation"
                     />
-                  </div>
-                  <div className="flex items-center justify-between gap-3 bg-slate-50 px-3 py-1.5">
-                    <p className="truncate text-[11px] leading-relaxed text-ink-500">
-                      已隐藏站方推荐与头部，以你的登录态加载。
-                      <span
-                        className={`ml-1.5 rounded px-1.5 py-0.5 font-semibold tabular-nums ${
-                          hiddenCount > 0
-                            ? 'bg-emerald-50 text-emerald-600'
-                            : 'bg-amber-50 text-amber-600'
-                        }`}
-                      >
-                        {hiddenCount > 0 ? `已清理 ${hiddenCount} 个元素` : '清理脚本运行中…'}
-                      </span>
-                      {filterLevel > 0 ? `（过滤强度 ${filterLevel}）` : ''}
-                    </p>
-                    {/* 站方推荐容器的类名由客户端 JS 生成、服务端无从得知，
-                        故提供逐级加强的按钮，按实际效果推进 */}
-                    <button
-                      type="button"
-                      onClick={escalateFilter}
-                      className="shrink-0 rounded-lg border border-ink-100 bg-white px-2 py-0.5
-                                 text-[11px] text-ink-700 transition-colors hover:border-ink-300"
-                    >
-                      推荐还在？加强过滤
-                    </button>
                   </div>
                 </>
               ) : (
@@ -659,22 +627,68 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
                   </div>
                 ) : null}
 
-                {/* 清晰度信息 */}
+                {/* 清晰度信息 + 选择 */}
                 <div className="rounded-xl bg-slate-50 px-3 py-2.5 text-[11px] leading-relaxed text-ink-600">
                   <p>
-                    当前可下载清晰度：
+                    已选清晰度：
                     <span className="font-semibold text-ink-900">
-                      {playurlInfo.quality_desc || `${playurlInfo.quality}P`}
+                      {pickedDesc || playurlInfo.quality_desc || `${playurlInfo.quality}P`}
                     </span>
                   </p>
-                  <p className="mt-1 text-ink-400">
-                    {playurlInfo.formats.length > 0
-                      ? `支持：${playurlInfo.formats.map((f) => f.desc).join(' / ')}`
-                      : ''}
+                  {playurlInfo.formats.length > 0 ? (
+                    <div className="mt-2">
+                      <p className="mb-1.5 text-[11px] font-medium text-ink-500">选择清晰度</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {playurlInfo.formats.map((f) => {
+                          // 未手动选过时，高亮平台实际给的那一档
+                          const active =
+                            downloadQn !== undefined
+                              ? downloadQn === f.quality
+                              : playurlInfo.quality === f.quality
+                          // 需要合并却没有 ffmpeg 的档位直接禁用，
+                          // 否则用户点下去只会拿到一个 400
+                          const blocked = !!f.needs_merge && !playurlInfo.ffmpeg_available
+                          return (
+                            <button
+                              key={f.quality}
+                              type="button"
+                              disabled={blocked}
+                              title={
+                                blocked
+                                  ? '服务端未检测到 ffmpeg，无法合并该档位'
+                                  : f.needs_merge
+                                    ? '该档位只有音视频分离的流，需服务端下载后合并'
+                                    : undefined
+                              }
+                              onClick={() => switchQuality(f.quality)}
+                              className={`rounded-lg px-2.5 py-1 text-[11px] transition-colors ${
+                                active
+                                  ? 'bg-bilibili text-white'
+                                  : 'bg-white text-ink-600 hover:bg-slate-200'
+                              } ${blocked ? 'cursor-not-allowed opacity-40 hover:bg-white' : ''}`}
+                            >
+                              {f.desc}
+                              {f.needs_merge ? (
+                                <span className={active ? 'ml-1 opacity-90' : 'ml-1 text-ink-400'}>
+                                  合并
+                                </span>
+                              ) : null}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  ) : null}
+                  <p className="mt-2 text-amber-600">
+                    ⚠ 720P 及以下走 MP4 直链，点开即下；标「合并」的档位（1080P
+                    及以上）只有音视频分离的流，需服务端下载后用 ffmpeg 合并，请稍候。
+                    上限取决于登录态（游客 480P，登录 1080P，大会员更高）。
                   </p>
-                  <p className="mt-1 text-amber-600">
-                    ⚠ 清晰度上限取决于登录态（游客 480P，登录 1080P，大会员更高）。
-                  </p>
+                  {playurlInfo.ffmpeg_available === false ? (
+                    <p className="mt-1 text-amber-600">
+                      ⚠ 服务端未检测到 ffmpeg，标「合并」的高画质档位暂不可用。
+                    </p>
+                  ) : null}
                 </div>
 
                 <button
@@ -683,7 +697,7 @@ export default function VideoDetailModal({ platform, uid, accentColor, fallback,
                   className="btn-primary w-full !text-xs"
                   style={{ backgroundColor: accentColor }}
                 >
-                  开始下载（{playurlInfo.title || bvid}）
+                  {pickedNeedsMerge ? '开始下载（需服务端合并，请稍候）' : `开始下载（${playurlInfo.title || bvid}）`}
                 </button>
               </div>
             ) : ytStreams ? (

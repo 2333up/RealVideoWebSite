@@ -139,6 +139,8 @@ async def recommend(
     order: str = "relevance",
     duration_min: int | None = None,
     duration_max: int | None = None,
+    min_views: int | None = None,
+    min_followers: int | None = None,
     credentials_provider=None,
     rerank: bool = False,
     fetch_pages: int = DEFAULT_FETCH_PAGES,
@@ -167,6 +169,8 @@ async def recommend(
         order=order,
         duration_min=duration_min,
         duration_max=duration_max,
+        min_views=min_views,
+        min_followers=min_followers,
     )
 
     async def _run(

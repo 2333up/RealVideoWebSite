@@ -28,6 +28,7 @@ import asyncio
 import logging
 import re
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -81,12 +82,90 @@ _YTDLP_CLIENT_CHAIN: list[list[str]] = [
     ["android"],
 ]
 
+# 整页嵌入时注入的请求转发补丁。
+#
+# 为什么必须有它：把 YouTube 的 /watch 页面代理成同源后，页面里的 JS 会向
+# https://www.youtube.com/youtubei/v1/player 发 XHR 取播放数据。这个请求从
+# 我们的源（127.0.0.1:8000）发出属于跨域，而 YouTube 不会给我们回
+# Access-Control-Allow-Origin，于是播放器永远拿不到数据 —— 页面能显示，视频
+# 播不了，正是「显示了原网页却看不了」的形态。
+#
+# 因此把 YouTube 域下的 fetch / XHR 改道到我们自己的同源代理接口，
+# 由服务端带着代理配置去取，绕开 CORS。
+#
+# 注意：<script src> / <link> 这类标签加载不受 CORS 限制，仍直连 YouTube，
+# 只有 XHR 家族需要改道，不必把所有资源都搬回服务端。
+_YT_EMBED_SHIM = r"""
+<script>
+(function () {
+  var PREFIX = '/api/platforms/youtube/proxy?url=';
+  var ALLOW = ['youtube.com', 'ytimg.com', 'googlevideo.com', 'ggpht.com', 'gstatic.com'];
+  function allowed(host) {
+    return ALLOW.some(function (h) { return host === h || host.slice(-(h.length + 1)) === '.' + h; });
+  }
+  function rewrite(u) {
+    if (!u || typeof u !== 'string') return u;
+    if (u.indexOf(PREFIX) === 0) return u;          // 已改过道，别二次包裹
+    if (u.indexOf('/api/platforms/youtube/') === 0) return u;
+    try {
+      var abs = new URL(u, location.href);
+      if (!allowed(abs.hostname)) return u;
+      return PREFIX + encodeURIComponent(abs.href);
+    } catch (e) { return u; }
+  }
+
+  var _fetch = window.fetch;
+  window.fetch = function (input, init) {
+    try {
+      if (typeof input === 'string') {
+        arguments[0] = rewrite(input);
+      } else if (input && typeof input.url === 'string') {
+        var r = rewrite(input.url);
+        if (r !== input.url) { arguments[0] = new Request(r, input); }
+      }
+    } catch (e) {}
+    return _fetch.apply(this, arguments);
+  };
+
+  var _open = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (method, url) {
+    try { arguments[1] = rewrite(url); } catch (e) {}
+    return _open.apply(this, arguments);
+  };
+
+  var _beacon = navigator.sendBeacon && navigator.sendBeacon.bind(navigator);
+  if (_beacon) {
+    navigator.sendBeacon = function (url, data) {
+      try { url = rewrite(url); } catch (e) {}
+      return _beacon(url, data);
+    };
+  }
+})();
+</script>
+"""
+
 
 class YouTubeError(RuntimeError):
     def __init__(self, code: int, message: str) -> None:
         self.code = code
         self.message = message
         super().__init__(f"[{code}] {message}")
+
+
+@dataclass
+class _SearchCursor:
+    """一次关键词检索的翻页游标与累计结果。
+
+    items 是**累计**的（首页 + 已走过的所有翻页），因此按 offset 切片即可
+    得到任意一页；重复请求同一页不会重复抓取。token 为 None 表示已到底。
+    """
+
+    items: list[ContentItem]
+    token: str | None
+    reached_pages: int
+    api_key: str | None = None
+    client_version: str | None = None
+    visitor_data: str | None = None
 
 
 class YouTubeAdapter(PlatformAdapter):
@@ -101,6 +180,13 @@ class YouTubeAdapter(PlatformAdapter):
 
     def __init__(self) -> None:
         self._client: httpx.AsyncClient | None = None
+        # 翻页游标缓存。YouTube 的 continuation 是**链式**的：想拿第 3 页，
+        # 必须先把第 1、2 页的 token 依次走一遍。搜索词相同的一次会话里，
+        # 「加载更多」会反复请求同样的前几页，因此把 token 与已解析条目都
+        # 按查询条件缓存下来，后续翻页只是从缓存里接着往后走。
+        # 键含 keyword/sp/筛选，容量超限时整体丢弃 —— 视频搜索的时效性很短，
+        # 没有长期缓存的价值。
+        self._search_cache: dict[str, "_SearchCursor"] = {}
 
     # ------------------------------------------------------------ HTTP
     def _build_client_kwargs(self) -> dict[str, Any]:
@@ -136,17 +222,50 @@ class YouTubeAdapter(PlatformAdapter):
     async def search(
         self, params: SearchParams, credentials: dict[str, Any] | None = None
     ) -> list[ContentItem]:
-        """按关键词检索视频。
+        """按关键词检索视频，支持翻页。
 
-        搜索结果页是 SSR 直出的一次性快照：翻页依赖 continuation token 与
-        InnerTube API（需硬编码 API key，脆弱）。因此 page > 1 直接返回空，
-        交由前端停止「加载更多」——与小红书适配器同样的取舍。
+        为什么要实现翻页：搜索结果页是 SSR 直出的一次性快照，**只有首屏约
+        30 条**，其中 shorts 卡片又会被结构化解析丢弃，最终常见只剩十几条。
+        旧实现对 page > 1 直接返回空，用户点一次「加载更多」就到底了。
+
+        现在改用 InnerTube 的 continuation 游标：首屏 HTML 里带着 API key 与
+        client 版本，用它们 POST /youtubei/v1/browse 即可按游标继续取下一批，
+        与网页端「加载更多」走的是同一条链路。
         """
-        if params.page > 1:
-            logger.info("YouTube 搜索不支持翻页（page=%s），返回空以终止加载更多", params.page)
-            return []
-
         sp = self._build_sp(params)
+        limit = min(params.page_size, settings.YOUTUBE_SEARCH_LIMIT)
+        cache_key = self._cache_key(params, sp)
+
+        if params.page <= 1:
+            cursor = await self._search_first_page(params, sp)
+        else:
+            cursor = self._search_cache.get(cache_key)
+            if cursor is None:
+                # 进程重启 / 缓存被清后用户直接翻页：重新走一遍首屏把游标接上，
+                # 否则只能返回空，前端会误以为「没有更多」。
+                cursor = await self._search_first_page(params, sp)
+            else:
+                await self._advance_cursor(cursor, params.page - 1)
+
+        offset = (params.page - 1) * limit
+        if offset >= len(cursor.items):
+            return []
+        return cursor.items[offset : offset + limit]
+
+    def _cache_key(self, params: SearchParams, sp: str) -> str:
+        return "|".join(
+            [
+                params.keyword,
+                sp,
+                ",".join(sorted(params.kinds)),
+                str(params.page_size),
+            ]
+        )
+
+    async def _search_first_page(
+        self, params: SearchParams, sp: str
+    ) -> "_SearchCursor":
+        """抓取 SSR 首屏，建好游标并入缓存。"""
         query: dict[str, str] = {"search_query": params.keyword, "hl": "en", "gl": "US"}
         if sp:
             query["sp"] = sp
@@ -166,26 +285,147 @@ class YouTubeAdapter(PlatformAdapter):
                 "或当前网络无法访问 YouTube —— 请检查 YOUTUBE_PROXY 配置）",
             )
 
-        renderers = self._collect_video_renderers(data)
         limit = min(params.page_size, settings.YOUTUBE_SEARCH_LIMIT)
-        items: list[ContentItem] = []
-        seen: set[str] = set()
-        for node in renderers:
-            item = self._video_renderer_to_item(node)
-            if item and item.uid not in seen:
-                seen.add(item.uid)
-                items.append(item)
-            if len(items) >= limit:
-                break
+        cursor = _SearchCursor(
+            items=self._dedupe(self._renderers_to_items(self._collect_video_renderers(data))),
+            # 注意传的是 HTML 原文而非 ytInitialData：游标在正文里，不在 JSON 里
+            token=self._extract_continuation_token(resp.text),
+            reached_pages=1,
+        )
+        # 关键：InnerTube 的 API key 与 client 版本就写在首屏 HTML 的
+        # ytcfg.set() 里，客户端版本会随 YouTube 发版变化，因此每次都从页面
+        # 现取而不是写死在代码里（写死必然某天失效）。
+        cursor.api_key = self._extract_cfg(resp.text, "INNERTUBE_API_KEY")
+        cursor.client_version = self._extract_cfg(resp.text, "INNERTUBE_CLIENT_VERSION")
+        cursor.visitor_data = self._extract_cfg(resp.text, "VISITOR_DATA")
 
-        if not items:
+        if not cursor.items:
             raise YouTubeError(
                 -1,
                 f"YouTube 搜索「{params.keyword}」未返回视频结果。"
                 "可能是关键词无结果，或当前网络无法访问 YouTube",
             )
-        logger.info("YouTube 搜索「%s」解析出 %d 条", params.keyword, len(items))
+
+        if len(self._search_cache) > 20:
+            self._search_cache.clear()
+        self._search_cache[self._cache_key(params, sp)] = cursor
+        logger.info(
+            "YouTube 搜索「%s」首屏解析出 %d 条，翻页游标=%s",
+            params.keyword,
+            len(cursor.items),
+            "有" if cursor.token else "无",
+        )
+        return cursor
+
+    async def _advance_cursor(self, cursor: "_SearchCursor", target_pages: int) -> None:
+        """把游标推进到第 target_pages 页（已消耗的页数）。
+
+        continuation 是单向链表：只能一页一页往后走，不能直接跳到第 N 页。
+        已缓存的条目会一直累积，因此重复请求同一页不会重复抓取。
+        """
+        while cursor.reached_pages < target_pages:
+            if not cursor.token:
+                return
+            page_items = await self._fetch_continuation(cursor)
+            cursor.items.extend(self._dedupe(page_items))
+            cursor.reached_pages += 1
+            if not page_items:
+                # token 已耗尽但游标还在？保守起见视为到底，避免无限循环
+                cursor.token = None
+                return
+
+    async def _fetch_continuation(self, cursor: "_SearchCursor") -> list[ContentItem]:
+        """用当前游标 token 调 InnerTube search 接口取下一批，并更新游标。
+
+        接口必须是 `/youtubei/v1/search` 而不是 `/browse`：搜索结果的
+        continuationEndpoint.commandMetadata.webCommandMetadata 里写的
+        apiUrl 就是它（实测调用 browse 会被静默返回空列表）。
+        """
+        if not cursor.token or not cursor.api_key:
+            return []
+        client = await self._ensure_client()
+        client_ctx: dict[str, Any] = {
+            "clientName": "WEB",
+            "clientVersion": cursor.client_version or "2.20240101.00.00",
+            "hl": "en",
+            "gl": "US",
+        }
+        if cursor.visitor_data:
+            client_ctx["visitorData"] = cursor.visitor_data
+        payload = {"context": {"client": client_ctx}, "continuation": cursor.token}
+        try:
+            resp = await client.post(
+                f"{WEB_BASE}/youtubei/v1/search",
+                params={"key": cursor.api_key, "prettyPrint": "false"},
+                json=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("YouTube 翻页请求失败，停止加载更多: %s", exc)
+            cursor.token = None
+            return []
+
+        # 下一段游标与首屏同一套结构
+        cursor.token = self._extract_continuation_token(data)
+        return self._renderers_to_items(self._collect_video_renderers(data))
+
+    @staticmethod
+    def _dedupe(items: list[ContentItem]) -> list[ContentItem]:
+        seen: set[str] = set()
+        out: list[ContentItem] = []
+        for item in items:
+            if item.uid in seen:
+                continue
+            seen.add(item.uid)
+            out.append(item)
+        return out
+
+    def _renderers_to_items(
+        self, renderers: list[dict[str, Any]], limit: int | None = None
+    ) -> list[ContentItem]:
+        items: list[ContentItem] = []
+        for node in renderers:
+            item = self._video_renderer_to_item(node)
+            if item:
+                items.append(item)
+            if limit and len(items) >= limit:
+                break
         return items
+
+    @staticmethod
+    def _extract_cfg(html: str, key: str) -> str | None:
+        """从 ytcfg.set({...}) 里取一个字符串配置项。"""
+        match = re.search(rf'"{key}":"([^"]+)"', html)
+        return match.group(1) if match else None
+
+    # 翻页游标。首屏 SSR 把 continuationItemRenderer 放在 HTML 正文里而不是
+    # ytInitialData 内（实测 ytInitialData 里找不到，只有裸正则能命中），
+    # InnerTube 响应则又是同一套 JSON 结构，因此两种来源都要覆盖。
+    _CONTINUATION_RE = re.compile(
+        r'"continuationCommand":\{"token":"([^"]+)"', re.S
+    )
+
+    @classmethod
+    def _extract_continuation_token(cls, data_or_html: Any) -> str | None:
+        """取出可用于「加载更多」的 continuation token。
+
+        注意不能取第一个 token —— 页面里还有筛选 chip（时长/排序/类型）的
+        continuation，它们同样指向 /youtubei/v1/search，用它们请求回来的
+        是被筛选过的子集，会让翻页结果错乱。这里不区分来源地取 token，
+        但**始终走原 sp 参数的首屏游标**，即取搜索结果末尾那个
+        CONTINUATION_TRIGGER_ON_ITEM_SHOWN 对应的 token：
+        它在 HTML 中总是最后一个 continuationItemRenderer。
+        """
+        if isinstance(data_or_html, str):
+            text = data_or_html
+        else:
+            import json
+
+            text = json.dumps(data_or_html, ensure_ascii=False)
+        matches = cls._CONTINUATION_RE.findall(text)
+        return matches[-1] if matches else None
 
     @staticmethod
     def _build_sp(params: SearchParams) -> str:
@@ -217,17 +457,25 @@ class YouTubeAdapter(PlatformAdapter):
 
     @staticmethod
     def _collect_video_renderers(data: Any) -> list[dict[str, Any]]:
-        """递归收集页面里所有 videoRenderer 节点。
+        """递归收集页面里所有视频卡片节点。
 
-        搜索结果里还会混入 shorts（reelItemRenderer / shortsLockupViewModel）
-        与推荐位，这里只取标准视频卡片，保证结构可控。
+        YouTube 2025 起把搜索结果改成了 `lockupViewModel`（新版通用卡片），
+        老字段 `videoRenderer` 仍在少量位置保留。实测同一个首屏里
+        `lockupViewModel` 11 个、`videoRenderer` 12 个 —— 只认老字段会白白
+        丢掉近一半结果，这正是「搜索结果太少」的直接原因。
+        因此两种结构都收集，并统一打上 __node_kind 供后续分支解析。
         """
         found: list[dict[str, Any]] = []
 
         def walk(node: Any) -> None:
             if isinstance(node, dict):
-                if "videoRenderer" in node and isinstance(node["videoRenderer"], dict):
-                    found.append(node["videoRenderer"])
+                for key in ("videoRenderer", "lockupViewModel"):
+                    child = node.get(key)
+                    if isinstance(child, dict):
+                        # 复制而非直接改原对象：避免污染已解析的缓存结构
+                        tagged = dict(child)
+                        tagged["__node_kind"] = key
+                        found.append(tagged)
                 for value in node.values():
                     walk(value)
             elif isinstance(node, list):
@@ -239,7 +487,95 @@ class YouTubeAdapter(PlatformAdapter):
 
     # ------------------------------------------------------------ 解析
     def _video_renderer_to_item(self, node: dict[str, Any]) -> ContentItem | None:
-        """把 videoRenderer 压平成统一的 ContentItem。"""
+        """把视频卡片压平成统一的 ContentItem（兼容新旧两种结构）。"""
+        if node.get("__node_kind") == "lockupViewModel" or "videoId" not in node:
+            return self._lockup_to_item(node)
+        return self._legacy_video_renderer_to_item(node)
+
+    def _lockup_to_item(self, node: dict[str, Any]) -> ContentItem | None:
+        """解析新版 lockupViewModel 卡片。
+
+        结构（节选）：
+          contentId / contentType:"LOCKUP_CONTENT_TYPE_VIDEO"
+          metadata.lockupMetadataViewModel
+            .title.content                     标题
+            .image.contentImageViewModel.image.sources[]   封面
+            .metadata.contentMetadataViewModel.metadataRows[].metadataParts[].text.content
+                                                  第一行=频道名，第二行=[播放量, 时间]
+            .badges[].lockupBadgeViewModel.content          时长
+        每层都做存在性判断：YouTube 改结构时宁可少几个字段，也不要整条崩掉。
+        """
+        video_id = str(node.get("contentId") or "")
+        content_type = str(node.get("contentType") or "")
+        if not video_id or content_type and "VIDEO" not in content_type.upper():
+            return None
+
+        meta = ((node.get("metadata") or {}).get("lockupMetadataViewModel") or {})
+
+        title = self._content_text(meta.get("title"))
+
+        # 封面：image → contentImageViewModel → image → sources[]
+        image_model = (meta.get("image") or {}).get("contentImageViewModel") or {}
+        sources = ((image_model.get("image") or {}).get("sources")) or []
+        cover_url = sources[0].get("url", "") if sources else ""
+
+        # 时长在 badges 里
+        duration = None
+        for badge in meta.get("badges") or []:
+            content = self._content_text((badge.get("lockupBadgeViewModel") or {}).get("content"))
+            if content:
+                duration = self._parse_duration(content)
+                if duration:
+                    break
+
+        # metadataRows：第一行是频道名，第二行是「播放量 · 时间」
+        channel_name = ""
+        view_count = 0
+        published_at = None
+        rows = (
+            ((meta.get("metadata") or {}).get("contentMetadataViewModel") or {}).get("metadataRows")
+            or []
+        )
+        for row in rows:
+            parts = row.get("metadataParts") or []
+            texts = [
+                self._content_text(p.get("text"))
+                for p in parts
+            ]
+            texts = [t for t in texts if t]
+            if not texts:
+                continue
+            if not channel_name:
+                channel_name = texts[0]
+                continue
+            for text in texts:
+                parsed = self._parse_count(text)
+                if parsed and not view_count:
+                    view_count = parsed
+                    continue
+                if published_at is None and ("ago" in text or "前" in text):
+                    published_at = self._parse_relative_time(text)
+
+        return ContentItem(
+            platform=self.key,
+            kind="video",
+            uid=video_id,
+            title=title or f"YouTube 视频 {video_id}",
+            summary="",
+            cover_url=cover_url,
+            page_url=f"{WATCH_URL}?v={video_id}",
+            author=Author(uid="", name=channel_name),
+            published_at=published_at,
+            duration=duration,
+            view_count=view_count,
+            like_count=0,
+            comment_count=0,
+            tags=[],
+            extra={"video_id": video_id, "node_kind": "lockupViewModel"},
+        )
+
+    def _legacy_video_renderer_to_item(self, node: dict[str, Any]) -> ContentItem | None:
+        """把老结构 videoRenderer 压平成统一的 ContentItem。"""
         video_id = str(node.get("videoId") or "")
         if not video_id:
             return None
@@ -288,6 +624,23 @@ class YouTubeAdapter(PlatformAdapter):
             tags=self._extract_badges(node),
             extra={"video_id": video_id, "channel_id": channel_id},
         )
+
+    @staticmethod
+    def _content_text(node: Any) -> str:
+        """新版 lockupViewModel 用的是 {"content": "..."} 这种单一文本形态。
+
+        与旧结构的 simpleText / runs[] 不同，且值也可能是裸字符串，
+        因此不能直接复用 _text，两种都兜住。
+        """
+        if node is None:
+            return ""
+        if isinstance(node, str):
+            return node.strip()
+        if isinstance(node, dict):
+            content = node.get("content")
+            if isinstance(content, str):
+                return content.strip()
+        return ""
 
     @staticmethod
     def _text(node: Any) -> str:
@@ -489,6 +842,51 @@ class YouTubeAdapter(PlatformAdapter):
             return int(value)
         except (TypeError, ValueError):
             return 0
+
+    # ------------------------------------------------------------ 整页嵌入
+    async def fetch_embed_html(
+        self, video_id: str, credentials: dict[str, Any] | None = None
+    ) -> str:
+        """抓取 YouTube 原视频页，做成同源可嵌入的页面。
+
+        为什么不能直接 iframe 原网页：YouTube 的 /watch 带
+        `X-Frame-Options: SAMEORIGIN`，浏览器会直接拒绝任何跨域嵌入，
+        硬塞进 iframe 只会得到一个空白框。
+
+        因此由服务端取回 HTML 后同源返回，并做两件事让页面真正可用：
+          1. 注入 <base>，让页面里的相对路径（CSS / 图片）解析到 youtube.com
+          2. 注入请求转发补丁，把 YouTube 域的 XHR 改道到我们的同源代理，
+             否则播放器取不到数据（详见 _YT_EMBED_SHIM 的说明）
+
+        这里刻意**不做**净化：用户要的就是「原网页」，隐藏推荐区之类的处理
+        反而会破坏 YouTube 自己的布局。
+        """
+        client = await self._ensure_client()
+        try:
+            resp = await client.get(
+                WATCH_URL, params={"v": video_id, "hl": "zh-CN", "gl": "US"}
+            )
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.warning("抓取 YouTube 原页面失败（%s）: %s", video_id, exc)
+            return ""
+
+        html = resp.text
+
+        # 1. base 标签：相对路径资源才能正确指向 YouTube
+        base_tag = '<base href="https://www.youtube.com/">'
+        if "<head" in html:
+            html = html.replace("<head", "<head>\n" + base_tag, 1)
+        else:
+            html = base_tag + html
+
+        # 2. 请求转发补丁必须尽早执行，放在 <head> 最前面才能覆盖后续脚本发起的请求
+        if "<head" in html:
+            html = html.replace("<head", "<head>" + _YT_EMBED_SHIM, 1)
+        else:
+            html = _YT_EMBED_SHIM + html
+
+        return html
 
     # ------------------------------------------------------------ 下载
     @staticmethod

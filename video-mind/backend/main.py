@@ -33,7 +33,10 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# 本地工具：前端固定跑在 5273，放开 CORS 即可
+# 本应用通常由仓库根目录的 backend/main.py 挂载到 /videomind 子路径下，
+# 届时这层 CORS 会被剥掉、统一由主应用处理（否则会出现重复的
+# Access-Control-Allow-Origin 响应头，浏览器直接拒绝）。
+# 保留它是为了单独调试：python -m uvicorn main:app --port 8600 --reload
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

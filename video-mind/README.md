@@ -21,37 +21,36 @@
 
 ## 快速开始
 
-### 1. 安装依赖
+video-mind 的前端已合并进仓库根目录的统一前端工程（`frontend/`），
+后端由主应用挂载在 `/videomind` 子路径下。**全仓只有一个前端服务（5173）
+和一个后端服务（8000）**，从仓库根目录启动：
 
 ```bash
-cd backend
-python -m venv .venv
-.venv/Scripts/python.exe -m pip install -r requirements.txt
+# 后端（8000，内含挂载的 video-mind 子应用）
+cd backend && pip install -r requirements.txt
+python -m uvicorn main:app --port 8000
 
-cd ../frontend
-npm install
+# 前端（5173，/videomind/* 路由即 video-mind）
+cd frontend && npm install && npm run dev
 ```
 
-前提：系统 PATH 中需要有 `ffmpeg` 与 `ffprobe`。
+浏览器打开：
 
-### 2. 配置大模型
+- 灵搜 LingoSeek：http://127.0.0.1:5173/
+- video-mind：http://127.0.0.1:5173/videomind/
+
+两个入口在同一页面内互相跳转，不需要再记第二个地址。
+Windows 用户可用仓库根目录的 `start.bat` 一键启动（本机脚本，未入库）。
+
+> 单独的 `video-mind/frontend` 工程已不存在；其源码位于
+> `frontend/src/videomind/`， API 基地址为 `/videomind/api`。
+
+### 配置大模型
 
 复制 `backend/.env.example` 为 `backend/.env`，填入 Key（推荐 DeepSeek，
 1 小时视频的分析成本约几分钱）。也可以在应用的「设置」页面里填。
 
-### 3. 启动
-
-```bash
-# 后端（8600 端口）
-cd backend && .venv/Scripts/python.exe -m uvicorn main:app --port 8600
-
-# 前端（5273 端口）
-cd frontend && npm run dev
-```
-
-浏览器打开 http://127.0.0.1:5273
-
-Windows 用户可直接双击根目录下的 `start.bat`。
+前提：系统 PATH 中需要有 `ffmpeg` 与 `ffprobe`。
 
 ## 使用流程
 
@@ -70,21 +69,23 @@ Windows 用户可直接双击根目录下的 `start.bat`。
 
 ```
 video-mind/
-├── backend/                    FastAPI + SQLite
-│   ├── core/                   配置、数据模型、数据库
-│   ├── providers/
-│   │   ├── asr/                ASR 双通道：本地 faster-whisper / 云端
-│   │   └── llm/                大模型：DeepSeek / 通义 / 豆包 / OpenAI / 自定义
-│   ├── pipeline/
-│   │   ├── media.py            ffmpeg：探测、抽音频、截关键帧
-│   │   ├── chapter.py          分章节（含防幻觉三道防线）
-│   │   ├── mindmap.py          生成思维导图
-│   │   └── runner.py           流水线编排与进度回写
-│   └── routers/                videos / jobs / settings
-└── frontend/                   React 18 + Vite 5 + ReactFlow
-    └── src/
-        ├── components/         VideoPlayer / MindMap / ChapterList / Transcript
-        └── lib/                mindmapLayout（自建布局算法）/ seekRequest
+└── backend/                    FastAPI + SQLite（由主后端挂载到 /videomind）
+    ├── core/                   配置、数据模型、数据库
+    ├── providers/
+    │   ├── asr/                ASR 双通道：本地 faster-whisper / 云端
+    │   └── llm/                大模型：DeepSeek / 通义 / 豆包 / OpenAI / 自定义
+    ├── pipeline/
+    │   ├── media.py            ffmpeg：探测、抽音频、截关键帧
+    │   ├── chapter.py          分章节（含防幻觉三道防线）
+    │   ├── mindmap.py          生成思维导图
+    │   └── runner.py           流水线编排与进度回写
+    └── routers/                videos / jobs / settings
+
+前端源码在仓库根目录的 frontend/src/videomind/（已与灵搜合并为单一工程）：
+├── VideoMindApp.tsx           应用根组件（路由 /videomind/*）
+├── api.ts                     API 客户端（基地址 /videomind/api）
+├── components/                VideoPlayer / MindMap / ChapterList / Transcript …
+└── lib/                       mindmapLayout（自建布局算法）/ seekRequest
 ```
 
 ### 处理流水线
