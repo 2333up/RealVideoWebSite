@@ -15,6 +15,10 @@ import AccountPanel from './components/AccountPanel'
 import VideoDetailModal from './components/VideoDetailModal'
 import XhsEmbedResult from './components/XhsEmbedResult'
 import DouyinEmbedResult from './components/DouyinEmbedResult'
+// 大模型设置与大模型密钥是**两个产品共用**的一份配置（存在 video-mind/backend/.env）。
+// 因此灵搜直接复用 video-mind 的 SettingsPanel 并只取其中的「大模型」区块，
+// 而不是另写一套：两套 UI 各自演进，迟早会出现「这边改了 key 那边看不到」。
+import SettingsPanel from './videomind/components/SettingsPanel'
 
 const ORDER_OPTIONS: { key: SearchOrder; label: string; hint: string }[] = [
   { key: 'relevance', label: '综合排序', hint: '沿用平台的原生综合相关度' },
@@ -92,6 +96,8 @@ export default function App() {
   const [loginOpen, setLoginOpen] = useState(false)
   const [panelOpen, setPanelOpen] = useState(false)
   const [loginPlatform, setLoginPlatform] = useState<PlatformMeta | null>(null)
+  // 大模型 API 设置浮层（复用 video-mind 的 SettingsPanel，只显示大模型区块）
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   const inputRef = useRef<HTMLInputElement>(null)
   // 底部哨兵：滚动到其附近时自动加载下一批
@@ -324,6 +330,18 @@ export default function App() {
               <span aria-hidden>🎬</span>
               <span className="hidden md:block">Video-Mind</span>
             </Link>
+
+            {/* 大模型 API 设置：与 video-mind 共用同一份配置，见顶部 import 注释 */}
+            <button
+              type="button"
+              onClick={() => setSettingsOpen(true)}
+              className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-lg border border-ink-100
+                         bg-white text-sm text-ink-700 transition-colors hover:border-ink-300"
+              title="大模型 API 设置（与 Video-Mind 共用）"
+              aria-label="大模型 API 设置"
+            >
+              <span aria-hidden>⚙</span>
+            </button>
 
             {/* 账号入口（精简高度） */}
             <button
@@ -741,6 +759,12 @@ export default function App() {
           fallback={detailTarget.fallback}
           onClose={() => setDetailTarget(null)}
         />
+      ) : null}
+
+      {/* 大模型 API 设置：onlyLlm 只渲染大模型区块，
+          语音转写与分章节参数是 video-mind 专属，不在此出现 */}
+      {settingsOpen ? (
+        <SettingsPanel onlyLlm onClose={() => setSettingsOpen(false)} />
       ) : null}
 
       {loginPlatform ? (
