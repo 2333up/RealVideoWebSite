@@ -39,15 +39,20 @@
 pet/
 ├── assets/
 │   ├── deepseek-chan-sheet.jpg   角色三视图（构建输入）
-│   └── preview.png               四姿态深底预览
+│   ├── preview.png               四姿态深底预览
+│   └── fonts/
+│       ├── pet-bubble.ttf        气泡用手写体（53KB 子集）
+│       └── OFL.txt               字体授权（SIL Open Font License 1.1）
 ├── build-tools/
 │   ├── pet_app.py                桌宠主程序模板（技能模板 + 多姿态/互动/尺寸扩展）
 │   ├── make_poses.py             三视图 → 多姿态帧（抠底/对齐/统一画布）+ 配置与图标
+│   ├── make_bubble_font.py       按台词表裁剪字体子集（改台词后需重跑）
 │   ├── make_cutout.py            单张白底图抠图（换单张形象时用）
 │   ├── check_geometry.py         几何探针：打印窗口/绘制尺寸，排查显示异常
 │   └── build_exe.py              PyInstaller 打包 + 成品组装 + 启动自检
 └── build/Jingxi/                 构建工作区（不入库）
     ├── frames/f000..f003.png     正面 / 侧面 / 背面 / 演唱
+    ├── fonts/pet-bubble.ttf      气泡字体（打包时整目录复制到成品）
     ├── pet_config.json           名字 / 姿态映射 / 动画 / 尺寸 / 位置
     └── dist/Jingxi.exe           打包产物（约 35MB）
 ```
@@ -94,7 +99,12 @@ cd pet
 $PET_PY build-tools/make_poses.py --sheet assets/deepseek-chan-sheet.jpg \
   --out build/Jingxi --name 鲸汐 --preview
 
-# 2. 打包（--smoke 10 会启动 exe 存活 10 秒作为验收）
+# 2. 气泡字体子集（改了 LINES 台词就必须重跑，否则新字的字形会回退系统字体）
+$PET_PY build-tools/make_bubble_font.py --src <霞鹜文楷完整字体.ttf> \
+  --out assets/fonts/pet-bubble.ttf
+cp assets/fonts/pet-bubble.ttf build/Jingxi/fonts/
+
+# 3. 打包（--smoke 10 会启动 exe 存活 10 秒作为验收）
 $PET_PY build-tools/build_exe.py --dir build/Jingxi --exe-name Jingxi --smoke 10 --smoke-kill
 ```
 
@@ -117,7 +127,7 @@ $PET_PY build-tools/build_exe.py --dir build/Jingxi --exe-name Jingxi --smoke 10
 | 尺寸可调 | ✅ 滚轮无级 + 预设 + 自定义像素 | ✅ 多档 |
 | 待机动画 | ✅ 呼吸 / 漂浮 / 摇摆 / 静止 | ✅ 多状态 + 待机变体轮换 |
 | 戳一戳 / 长按摸头 / 双击 | ✅ | ✅ |
-| 台词气泡 | ✅ 35 条离线台词 | ✅ 预合成语音 + 气泡 |
+| 台词气泡 | ✅ 手写体气泡 + 35 条离线台词 | ✅ 预合成语音 + 气泡 |
 | 语音（TTS） | ❌ 未做 | ✅ edge-tts 预合成 49 条人声 |
 | 任务状态联动 | ❌ 不适用 | ✅ 联动 DSH 的 AI 任务进度 |
 | AI 对话 | ❌ 不适用 | ⚠️ 部分版本支持 |
@@ -132,6 +142,12 @@ $PET_PY build-tools/build_exe.py --dir build/Jingxi --exe-name Jingxi --smoke 10
   + `WA_TranslucentBackground` 实现透明置顶，且不占任务栏。
 - 气泡是**独立窗口**而非控件内绘制 —— 桌宠窗口按图片尺寸自适应，气泡超界会被裁掉。
   绘制区要给测量宽度留几像素余量，否则取整会让最后一行溢出、被裁掉半行。
+- **姿态切换走 130ms 交叉淡化**：旧帧保持不透明、新帧按 smoothstep 渐入。
+  硬切会「闪一下」；而时间拉长到 200ms 以上，两张全身像会叠出明显重影，反而更怪。
+- **气泡字体是霞鹜文楷的子集**（53KB，仅含台词用到的 223 个字符），随 exe 分发。
+  OFL 的保留字体名（RFN）要求修改版改名，所以子集已重命名为 `PetBubble Sans` ——
+  不要用原字体名再分发，也不要把完整字体塞进仓库。
+- 气泡出现/消失都有约 120~160ms 的淡入淡出，避免突然弹出来扎眼。
 - 交互判定靠**位移阈值**：按下到松开位移 > 4px 视为拖拽，否则才判点击；
   拖拽中取消长按计时，避免「拖远了停住」被误判成摸头。
 - 滚轮连滚时按 400ms 防抖写盘，避免每一格都触发一次 JSON 落盘。

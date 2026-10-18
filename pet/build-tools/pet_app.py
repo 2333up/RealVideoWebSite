@@ -27,9 +27,9 @@ import time
 from collections import deque
 
 from PyQt6.QtCore import Qt, QPoint, QRectF, QSize, QTimer
-from PyQt6.QtGui import (QAction, QActionGroup, QColor, QFont, QFontMetrics,
-                         QGuiApplication, QIcon, QImage, QMovie, QPainter,
-                         QPainterPath, QPen, QPixmap, QTextOption)
+from PyQt6.QtGui import (QAction, QActionGroup, QColor, QFont, QFontDatabase,
+                         QFontMetrics, QGuiApplication, QIcon, QImage, QMovie,
+                         QPainter, QPainterPath, QPen, QPixmap, QTextOption)
 from PyQt6.QtWidgets import (QApplication, QFileDialog, QInputDialog, QMenu,
                              QMessageBox, QSystemTrayIcon, QWidget)
 
@@ -170,6 +170,36 @@ LINES = {
 
 LONG_PRESS_MS = 700   # 按住超过这个时长算「摸头」
 CLICK_SLOP = 4        # 位移小于该像素仍视为点击（区分拖拽）
+# 姿态切换的交叉淡化时长（秒）。
+# 太短 = 硬切（原问题）；太长 = 两张全身像叠太久，看起来像重影/穿模。
+# 130ms 约 4 帧，读起来是「快速转身」而不是「故障闪一下」。
+POSE_FADE_S = 0.13
+
+# 气泡用随包分发的手写体（霞鹜文楷子集，OFL 授权）。
+# 只打包台词里用到的字，约 53KB；缺失时回退系统字体，不影响功能。
+BUBBLE_FONT_FILE = "fonts/pet-bubble.ttf"
+
+
+def resolve_bubble_font():
+    """加载手写体并设置好字号/字距；找不到就回退到系统默认字体。"""
+    for rel in (BUBBLE_FONT_FILE, "pet-bubble.ttf"):
+        path = os.path.join(app_dir(), rel)
+        if not os.path.exists(path):
+            continue
+        fid = QFontDatabase.addApplicationFont(path)
+        if fid == -1:
+            continue
+        families = QFontDatabase.applicationFontFamilies(fid)
+        if not families:
+            continue
+        f = QFont(families[0])
+        f.setPointSizeF(10.5)
+        # 手写体本身字距偏紧，加一点点空隙更像说话而不是排版
+        f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.4)
+        return f
+    f = QFont()
+    f.setPointSizeF(10)
+    return f
 
 
 class SpeechBubble(QWidget):
@@ -179,8 +209,8 @@ class SpeechBubble(QWidget):
     单独开一个 Tool 窗口既能随意越界，也不会抢焦点（WindowTransparentForInput）。
     """
 
-    MAX_W = 240
-    PAD_X, PAD_Y = 11, 7
+    MAX_W = 260
+    PAD_X, PAD_Y = 13, 9
     TAIL = 7
 
     def __init__(self):
@@ -191,8 +221,8 @@ class SpeechBubble(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self._text = ""
-        self._font = QFont()
-        self._font.setPointSize(9)
+        self._font = resolve_bubble_font()
+        self._fading_in = False
         self._fade = QTimer(self)
         self._fade.setInterval(40)
         self._fade.timeout.connect(self._step_fade)
@@ -211,13 +241,23 @@ class SpeechBubble(QWidget):
         w = max(76, need.width() + self.PAD_X * 2 + 6)
         h = need.height() + self.PAD_Y * 2 + self.TAIL
         self.resize(w, h)
-        self.setWindowOpacity(1.0)
+        # 淡入：气泡突然出现和突然消失一样扎眼
+        self._fading_in = True
+        self.setWindowOpacity(0.0)
+        self._fade.start()
         self.show()
         self.raise_()
         self.update()
         self._hold.start(msec)
 
     def _step_fade(self):
+        if self._fading_in:
+            op = min(1.0, self.windowOpacity() + 0.2)
+            self.setWindowOpacity(op)
+            if op >= 1.0:
+                self._fading_in = False
+                self._fade.stop()
+            return
         op = self.windowOpacity() - 0.12
         if op <= 0.02:
             self._fade.stop()
@@ -233,7 +273,8 @@ class SpeechBubble(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         body = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -self.TAIL - 0.5)
         path = QPainterPath()
-        path.addRoundedRect(body, 10, 10)
+        # 圆角放大到 14：小圆角看着像输入框，大圆角才像「说话气泡」
+        path.addRoundedRect(body, 14, 14)
         # 底部小三角指向桌宠
         tip = QPainterPath()
         cx = self.width() / 2.0
@@ -242,10 +283,11 @@ class SpeechBubble(QWidget):
         tip.lineTo(cx + 6, body.bottom() - 1)
         tip.closeSubpath()
         path.addPath(tip)
-        p.setPen(QPen(QColor(188, 202, 224), 1))
-        p.setBrush(QColor(255, 255, 255, 242))
+        # 边框用浅蓝而不是灰黑：与角色配色呼应，不会像系统提示框
+        p.setPen(QPen(QColor(172, 200, 234), 1.2))
+        p.setBrush(QColor(255, 255, 255, 248))
         p.drawPath(path.simplified())
-        p.setPen(QColor(48, 62, 88))
+        p.setPen(QColor(74, 85, 104))
         p.setFont(self._font)
         opt = QTextOption()
         opt.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
@@ -279,6 +321,9 @@ class PetWidget(QWidget):
         self._react_kind = ""
         self._react_t0 = 0.0
         self._react_dur = 0.0
+        # 姿态交叉淡化：切换瞬间保留上一帧，避免画面「啪」地跳过去
+        self._prev_draw = QPixmap()
+        self._fade_t0 = 0.0
         self._long_timer = QTimer(self)
         self._long_timer.setSingleShot(True)
         self._long_timer.timeout.connect(self._on_long_press)
@@ -350,6 +395,9 @@ class PetWidget(QWidget):
         idx = self._pose_index(key)
         if idx == self.frame_idx:
             return
+        # 先留住当前画面，新帧以 alpha 渐入 -> 两帧交叉溶解，而不是硬切
+        self._prev_draw = self.draw_pix
+        self._fade_t0 = time.monotonic()
         self.frame_idx = idx
         self.base_pix = self.frames[idx]
         self._rescale_draw_pix()
@@ -456,7 +504,26 @@ class PetWidget(QWidget):
             p.rotate(rot)
         p.scale(sx, sy)
         p.translate(0.0, dy)
-        p.drawPixmap(QPoint(-self.draw_pix.width() // 2, -self.draw_pix.height()), self.draw_pix)
+        # 交叉淡化：旧帧先画满，新帧按 smoothstep 渐入，避免瞬时切换的闪跳感
+        alpha = 1.0
+        if self._fade_t0:
+            t = (time.monotonic() - self._fade_t0) / POSE_FADE_S
+            if t >= 1.0:
+                self._fade_t0 = 0.0
+                self._prev_draw = QPixmap()
+            else:
+                alpha = t * t * (3.0 - 2.0 * t)
+        if alpha < 1.0 and not self._prev_draw.isNull():
+            p.setOpacity(1.0)
+            p.drawPixmap(QPoint(-self._prev_draw.width() // 2, -self._prev_draw.height()),
+                         self._prev_draw)
+            p.setOpacity(alpha)
+            p.drawPixmap(QPoint(-self.draw_pix.width() // 2, -self.draw_pix.height()),
+                         self.draw_pix)
+            p.setOpacity(1.0)
+        else:
+            p.drawPixmap(QPoint(-self.draw_pix.width() // 2, -self.draw_pix.height()),
+                         self.draw_pix)
         p.end()
 
     # ---------- 交互 ----------
@@ -551,12 +618,13 @@ class PetWidget(QWidget):
             dy = -9.0 * abs(math.sin(p * math.pi * 3))
             sy = 1.0 + 0.05 * math.sin(p * math.pi * 6)
             sx = 1.0 - 0.035 * math.sin(p * math.pi * 6)
-            rot = 3.0 * math.sin(p * math.pi * 6)
+            rot = 2.2 * math.sin(p * math.pi * 6)
         else:
-            dy = -16.0 * math.sin(p * math.pi)
-            sy = 1.0 + 0.07 * math.sin(p * math.pi)
-            sx = 1.0 - 0.05 * math.sin(p * math.pi)
-            rot = -5.0 * math.sin(p * math.pi)
+            dy = -14.0 * math.sin(p * math.pi)
+            sy = 1.0 + 0.06 * math.sin(p * math.pi)
+            sx = 1.0 - 0.045 * math.sin(p * math.pi)
+            # 转身本身已经换了画面，再叠大幅度旋转会显得晃
+            rot = (-2.0 if self._react_kind == "double" else -3.2) * math.sin(p * math.pi)
         return dy, sx, sy, rot
 
     def _place_bubble(self):

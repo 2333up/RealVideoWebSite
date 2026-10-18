@@ -94,6 +94,12 @@ def assemble(build_dir, exe_name, exe_path):
         p = os.path.join(build_dir, fname)
         if os.path.exists(p):
             shutil.copyfile(p, os.path.join(final, fname))
+
+    # 附加资源目录（气泡字体等）整目录复制到成品
+    for sub in ("fonts",):
+        src_dir = os.path.join(build_dir, sub)
+        if os.path.isdir(src_dir):
+            shutil.copytree(src_dir, os.path.join(final, sub), dirs_exist_ok=True)
     # 资源已按 basename 复制到成品目录，配置里的路径必须同步改写。
     # ⚠️ 只写回 final，不要写回 build_dir：构建目录的配置仍要用 frames/xxx.png
     # 这类相对路径，一旦被改成扁平名，下次打包就再也找不到源文件了。
