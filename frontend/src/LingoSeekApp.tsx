@@ -695,10 +695,6 @@ export default function App() {
               一次搜索，
               <span style={{ color: platformColor }}>看遍</span>视频与图文
             </h2>
-            <p className="mx-auto mt-3 max-w-xl text-sm leading-relaxed text-ink-500">
-              输入关键词后，引擎会从视频与图文两条通道并行下探、自动翻页取满结果，
-              剔除搬运与重复内容，按平台原生排序列出全部收获。
-            </p>
 
             <div className="mx-auto mt-8 grid max-w-3xl gap-3 sm:grid-cols-3">
               {[
