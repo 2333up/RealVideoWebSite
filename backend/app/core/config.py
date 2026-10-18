@@ -69,6 +69,8 @@ class Settings(BaseSettings):
     # ---- 追番数据源（agedm）----
     # AGE 动漫的移动端接口，无需签名、无需代理即可直连。
     AGEDM_API_BASE: str = "https://api.agedm.io/v2"
+    # 站点地址（详情页在桌面版，返回的是 SSR 完整 HTML）
+    AGEDM_SITE_BASE: str = "https://www.agedm.io"
     # 该站点证书链不完整（缺中间证书），开启校验会直接 CERTIFICATE_VERIFY_FAILED。
     # 默认关闭以保证可用；若日后站点修好证书，把它设为 true 即可恢复校验。
     AGEDM_VERIFY_SSL: bool = False

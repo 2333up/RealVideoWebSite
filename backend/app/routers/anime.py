@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import HTMLResponse, Response
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -22,7 +23,7 @@ from app.schemas.anime import (
     MessageResponse,
 )
 from app.services import anime_service
-from app.services.agedm_client import AgedmError
+from app.services.agedm_client import AgedmError, agedm_client
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/anime", tags=["anime"])
@@ -101,3 +102,54 @@ async def check_updates(db: Session = Depends(get_db)):
         checked=len(anime_service.list_follows(db)),
         updated=[_to_out(f) for f in updated],
     )
+
+
+# ---------------------------------------------------------------- 页面代理
+
+
+@router.get("/embed", response_class=HTMLResponse)
+async def embed_detail(subject_id: int = Query(..., gt=0)):
+    """返回 agedm 作品详情页（同源），供应用内 iframe 嵌入。
+
+    agedm 带 `X-Frame-Options: SAMEORIGIN`，直接跨站 iframe 会被浏览器拒绝，
+    因此由服务端取回后同源返回 —— 与 YouTube 嵌入走的是同一套思路。
+
+    ⚠️ 只保证「详情 / 集数 / 介绍」可读；**点集数播放仍会空白**，
+    因为播放器是嵌套的第二个 iframe，同样带 XFO。界面需明确提示到站内观看。
+    """
+    try:
+        html = await agedm_client.fetch_detail_html(subject_id)
+    except AgedmError as exc:
+        return HTMLResponse(status_code=200, content=_fallback_page(str(exc)))
+    return HTMLResponse(content=html)
+
+
+@router.get("/proxy")
+async def proxy_api(url: str = Query(..., min_length=1)):
+    """转发页面内对 api.agedm.io 的 XHR（仅限该域，见客户端白名单）。"""
+    try:
+        status, body, ctype = await agedm_client.proxy_json(url)
+    except AgedmError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(content=body, status_code=status, media_type=ctype)
+
+
+def _fallback_page(reason: str) -> str:
+    """嵌入页不可用时的提示页（与 embed.py 的样式保持一致）。"""
+    return f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>页面加载失败</title>
+<style>
+  body {{ margin:0; height:100vh; display:flex; align-items:center; justify-content:center;
+        font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+        background:#FAFAFA; color:#2C2F38; }}
+  .box {{ text-align:center; padding:28px 32px; max-width:520px; }}
+  .icon {{ font-size:40px; opacity:.35; margin-bottom:10px; }}
+  h2 {{ margin:0 0 8px; font-size:15px; font-weight:600; }}
+  p {{ margin:0; font-size:12px; color:#8A90A0; line-height:1.7; }}
+</style></head>
+<body><div class="box">
+  <div class="icon">🔒</div>
+  <h2>番剧页面加载失败</h2>
+  <p>{reason[:200]}</p>
+</div></body></html>"""

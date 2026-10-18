@@ -1,6 +1,7 @@
 import { Route, Routes } from 'react-router-dom'
 import LingoSeekApp from './LingoSeekApp'
 import VideoMindApp from './videomind/VideoMindApp'
+import AnimeApp from './anime/AnimeApp'
 import ErrorBoundary from './components/ErrorBoundary'
 import WebPet from './components/webPet/WebPet'
 
@@ -11,6 +12,7 @@ import WebPet from './components/webPet/WebPet'
  * 跨应用跳转靠 window.open。融合后只剩一个工程、一个入口：
  *   - /              → 灵搜 LingoSeek（跨平台视频搜索）
  *   - /videomind/*   → Video-Mind（本地视频章节与思维导图）
+ *   - /anime         → 追番（agedm 数据源，管理列表 + 更新提醒）
  *
  * 约定：
  *   - /videomind/* 用通配符，子应用内部以后若加自己的子路由不会被这里截断；
@@ -24,6 +26,7 @@ export default function App() {
     <>
       <Routes>
         <Route path="/videomind/*" element={<VideoMindApp />} />
+        <Route path="/anime" element={<AnimeApp />} />
         <Route path="*" element={<LingoSeekApp />} />
       </Routes>
       {/* 桌宠挂在路由之外：切换页面时不重新挂载，走动/位置状态都能延续。

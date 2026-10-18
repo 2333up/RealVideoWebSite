@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import re
+import urllib.parse
 from typing import Any
 
 import httpx
@@ -93,6 +94,72 @@ class AgedmClient:
     async def aclose(self) -> None:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
+
+    # ---------------------------------------------------------- 页面代理
+
+    async def fetch_detail_html(self, subject_id: int) -> str:
+        """抓取作品详情页并改造成「同源可嵌入」的 HTML。
+
+        为什么要代理：agedm 全站带 `X-Frame-Options: SAMEORIGIN`，
+        浏览器会直接拒绝任何跨站 iframe 嵌入（实测报
+        「Refused to display ... in a frame」）。服务端取回后同源返回即可绕过。
+
+        必须注入 `<base>`：页面里的 CSS/图片是相对路径，脱离原域后会全部 404。
+        另外把 api.agedm.io 的 XHR 改道到同源代理，否则集数列表等数据取不到。
+
+        ⚠️ **播放器无法这样救活**：点集数后播放器是**嵌套的第二个 iframe**，
+        同样带 XFO；`<base>` 会把它的相对地址解析回 www.agedm.io，于是又被自己的
+        XFO 拒绝，最终是一屏空白。因此本方法只保证「详情 / 集数与介绍可读」，
+        播放需要跳转站内（前端界面有明确提示，不假装可播）。
+        """
+        client = await self._ensure()
+        url = f"{settings.AGEDM_SITE_BASE}/detail/{subject_id}"
+        try:
+            resp = await client.get(url, headers={"Referer": settings.AGEDM_SITE_BASE})
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise AgedmError(f"抓取 AGE 动漫详情页失败：{exc}") from exc
+
+        html = resp.text
+        base_tag = f'<base href="{settings.AGEDM_SITE_BASE}/">'
+        if re.search(r"<head[^>]*>", html, re.I):
+            html = re.sub(r"(<head[^>]*>)", r"\1" + base_tag, html, count=1, flags=re.I)
+        else:
+            html = base_tag + html
+
+        # 把 api.agedm.io 的请求改道到同源代理（页面内 XHR 否则会被 CORS 拦）
+        shim = (
+            "<script>(function(){"
+            "var o=XMLHttpRequest.prototype.open;"
+            "XMLHttpRequest.prototype.open=function(m,u){"
+            "try{var s=String(u);"
+            "if(s.indexOf('api.agedm.io')>-1){u='/api/anime/proxy?url='+encodeURIComponent(s);}"
+            "}catch(e){}"
+            "return o.apply(this,[m,u].concat([].slice.call(arguments,2)));};"
+            "})();</script>"
+        )
+        if re.search(r"</head>", html, re.I):
+            html = re.sub(r"</head>", shim + "</head>", html, count=1, flags=re.I)
+        else:
+            html = shim + html
+        return html
+
+    async def proxy_json(self, url: str) -> tuple[int, bytes, str]:
+        """转发 api.agedm.io 的请求（供页面内 XHR 使用）。
+
+        只允许 api.agedm.io —— 这是 SSRF 防线：该端点本质是「代取任意 URL」，
+        无白名单等于把本机网络敞开（可探测内网 / 读云元数据）。
+        """
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+        if host != "api.agedm.io":
+            raise AgedmError("只允许代理 api.agedm.io 的请求")
+        client = await self._ensure()
+        try:
+            resp = await client.get(url, headers={"Referer": settings.AGEDM_SITE_BASE})
+        except httpx.HTTPError as exc:
+            raise AgedmError(f"代理解析失败：{exc}") from exc
+        ctype = resp.headers.get("content-type", "application/json")
+        return resp.status_code, resp.content, ctype
 
     async def _get_json(self, path: str, **params: Any) -> dict[str, Any]:
         client = await self._ensure()
