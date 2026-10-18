@@ -84,7 +84,9 @@ def assemble(build_dir, exe_name, exe_path):
 
     img = cfg.get("image")
     if isinstance(img, list):
-        cfg["image"] = [copy_resource(n) for n in img]
+        # 复制失败的项必须剔除：留着 None 会让成品配置指向不存在资源，
+        # 启动时才炸（而且 --noconsole 下看不到任何提示）。
+        cfg["image"] = [n for n in (copy_resource(x) for x in img) if n]
     elif img:
         cfg["image"] = copy_resource(img)
 
@@ -92,7 +94,10 @@ def assemble(build_dir, exe_name, exe_path):
         p = os.path.join(build_dir, fname)
         if os.path.exists(p):
             shutil.copyfile(p, os.path.join(final, fname))
-    with open(os.path.join(build_dir, "pet_config.json"), "w", encoding="utf-8") as f:
+    # 资源已按 basename 复制到成品目录，配置里的路径必须同步改写。
+    # ⚠️ 只写回 final，不要写回 build_dir：构建目录的配置仍要用 frames/xxx.png
+    # 这类相对路径，一旦被改成扁平名，下次打包就再也找不到源文件了。
+    with open(os.path.join(final, "pet_config.json"), "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
     bat = os.path.join(final, "启动源码版.bat")
     with open(bat, "w", encoding="ascii", newline="\r\n") as f:
