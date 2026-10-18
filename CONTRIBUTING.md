@@ -78,8 +78,8 @@ cd backend
 python -m venv .venv
 source .venv/Scripts/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-playwright install chromium          # 抖音浏览器检索依赖，必装
-cp .env.example .env                 # 可选，全部字段都有默认值
+playwright install chromium          # 抖音 / 小红书检索依赖，必装
+cp .env.example .env                 # 可选，全部字段都有默认值（YouTube 代理填这里）
 uvicorn main:app --reload --port 8000
 ```
 
@@ -177,7 +177,8 @@ npx prettier --write .
 npm run build         # 等价于 tsc + vite build 校验
 ```
 
-**CI 会在 PR 上自动跑这两套检查**，见 `.github/workflows/ci.yml`。
+**CI 已停用**：`.github/workflows` 与 dependabot 已由维护者移除（`cb171cf`），
+上面两套检查需**在本地手动跑完**再提 PR，并把结果贴进 PR 描述。
 
 ---
 
@@ -206,13 +207,22 @@ npm run build         # 等价于 tsc + vite build 校验
 
 ## 8. 测试与验收
 
-当前测试是手工脚本（`backend/test_douyin_browser.py`），PR 请附**可复现的自测记录**：
+**测试现状（重要，别按想象中的 CI 流程办事）：**
+
+| 范围 | 现状 | 命令 / 位置 |
+|---|---|---|
+| video-mind 后端 | ✅ pytest，100+ 用例 | `cd video-mind/backend && ./.venv/Scripts/python.exe -m pytest tests -q` |
+| 灵搜后端 | ❌ **无 pytest 用例**，只有实跑脚本 | `backend/scripts/verify_youtube_search.py`、`backend/test_douyin_browser.py`、`backend/test_xiaohongshu_browser.py` |
+| 前端（两个产品） | ✅ 构建门 + 端到端冒烟 | `npm run build`、`node frontend/scripts/e2e-smoke.mjs`（需 CDP 浏览器） |
+
+灵搜侧的 PR 请附**可复现的自测记录**：
 
 - 使用的关键词（建议用《美国老爹》这类有明确归属的番剧名，能同时验证跑题过滤）
 - 连续加载 3 批以上的结果条数与耗时
 - 全局去重后的条数（用于确认没有静默丢页或重复）
 
-新增核心逻辑（打分、去重、相关性判断）时，**请补一个 pytest 用例**，哪怕只覆盖一条 happy path。
+新增核心逻辑（打分、去重、相关性判断）时，**请补一个 pytest 用例**，哪怕只覆盖一条 happy path
+——灵搜侧目前还没有 `backend/tests/` 目录，新建时放这里，并同步更新本表。
 
 ---
 
