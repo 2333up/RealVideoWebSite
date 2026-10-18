@@ -5,5 +5,6 @@ init_db() 才能正确建表。
 """
 
 from app.models.account import PlatformAccount
+from app.models.anime import AnimeFollow
 
-__all__ = ["PlatformAccount"]
+__all__ = ["PlatformAccount", "AnimeFollow"]

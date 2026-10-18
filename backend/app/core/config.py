@@ -66,6 +66,15 @@ class Settings(BaseSettings):
     # YouTube 单次搜索页的结果数上限（受页面结构限制，与 SEARCH_PAGE_SIZE 无关）
     YOUTUBE_SEARCH_LIMIT: int = 60
 
+    # ---- 追番数据源（agedm）----
+    # AGE 动漫的移动端接口，无需签名、无需代理即可直连。
+    AGEDM_API_BASE: str = "https://api.agedm.io/v2"
+    # 该站点证书链不完整（缺中间证书），开启校验会直接 CERTIFICATE_VERIFY_FAILED。
+    # 默认关闭以保证可用；若日后站点修好证书，把它设为 true 即可恢复校验。
+    AGEDM_VERIFY_SSL: bool = False
+    # 显式代理。留空 = 直连（不走环境变量，避免被只放行白名单的会话代理劫持成 502）。
+    AGEDM_PROXY: str = ""
+
     @property
     def secret_key(self) -> str:
         """惰性持久化并返回对称加密密钥。"""

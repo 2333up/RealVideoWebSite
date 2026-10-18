@@ -41,7 +41,7 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expi
 def init_db() -> None:
     """创建所有尚未存在的表。"""
     # 模型需先被导入以注册到 Base.metadata
-    from app.models import account  # noqa: F401
+    from app.models import account, anime  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
 
