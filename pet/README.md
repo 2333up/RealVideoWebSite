@@ -14,7 +14,8 @@
 
 | 操作 | 效果 |
 |---|---|
-| 拖拽 | 移动位置，**拖拽时侧身**，松手恢复正面并记忆位置 |
+| **自动走动** | 每隔 6~14 秒自己走一段（2.5~6 秒），走到屏幕边缘会转身，鼠标悬停即停 |
+| 拖拽 | 移动位置，**拖拽时呈「被举起」姿态**（手臂上举、双腿悬空），松手记忆位置 |
 | 单击 | 戳一戳：**切到演唱姿势** + 弹跳 + 随机台词气泡 |
 | 按住 0.7 秒 | 摸头：演唱姿势 + 连续小跳 + 害羞台词 |
 | 双击 | **转身**（切到背面姿势）+ 撒娇台词 |
@@ -24,6 +25,21 @@
 | 托盘图标 | 点击恢复显示 |
 
 动作结束后自动回到正面待机姿势。首次启动有 1~3 秒延迟，是 onefile 解压，属正常。
+
+### 自动走动
+
+参数在 `pet_config.json` 的 `walk` 里，改完重启即生效，不用重新打包：
+
+```json
+"walk": { "frames": [4,5,6,7], "speed": 46, "pause": [6,14], "duration": [2.5,6.0], "fps": 7.5 }
+```
+
+- `speed`：像素/秒。1080p 上 46 大约是「慢慢晃过去」的速度。
+- `pause` / `duration`：两次走动的间隔、单次走动的时长（都取区间随机，避免机械感）。
+- `fps`：迈步换帧频率。四个走路帧循环播放。
+- **悬停即停**：鼠标移到她身上会站住，方便点击；移开一会儿再继续。
+- 拖拽、做反应、气泡显示期间都不会走动，避免和用户"抢"位置。
+- 朝左走时用**水平镜像**实现（素材只有一个朝向），不会出现两个人影。
 
 ### 关于尺寸
 
@@ -39,21 +55,23 @@
 pet/
 ├── assets/
 │   ├── deepseek-chan-sheet.jpg   角色三视图（构建输入）
+│   ├── gen/                      AI 补生成的素材：走路精灵图 / 被举起姿态
 │   ├── preview.png               四姿态深底预览
 │   └── fonts/
 │       ├── pet-bubble.ttf        气泡用手写体（53KB 子集）
 │       └── OFL.txt               字体授权（SIL Open Font License 1.1）
 ├── build-tools/
-│   ├── pet_app.py                桌宠主程序模板（技能模板 + 多姿态/互动/尺寸扩展）
+│   ├── pet_app.py                桌宠主程序模板（多姿态/走动/互动/尺寸）
 │   ├── make_poses.py             三视图 → 多姿态帧（抠底/对齐/统一画布）+ 配置与图标
+│   ├── add_frames.py             追加走路帧与「被举起」帧，并同步配置
 │   ├── make_bubble_font.py       按台词表裁剪字体子集（改台词后需重跑）
 │   ├── make_cutout.py            单张白底图抠图（换单张形象时用）
 │   ├── check_geometry.py         几何探针：打印窗口/绘制尺寸，排查显示异常
 │   └── build_exe.py              PyInstaller 打包 + 成品组装 + 启动自检
 └── build/Jingxi/                 构建工作区（不入库）
-    ├── frames/f000..f003.png     正面 / 侧面 / 背面 / 演唱
+    ├── frames/f000..f008.png     正 / 侧 / 背 / 演唱 / 走路×4 / 被举起
     ├── fonts/pet-bubble.ttf      气泡字体（打包时整目录复制到成品）
-    ├── pet_config.json           名字 / 姿态映射 / 动画 / 尺寸 / 位置
+    ├── pet_config.json           名字 / 姿态映射 / 走动参数 / 尺寸 / 位置
     └── dist/Jingxi.exe           打包产物（约 35MB）
 ```
 
@@ -95,16 +113,21 @@ pet/
 PET_PY="C:/Users/momo/.workbuddy/binaries/python/envs/pet/Scripts/python.exe"
 cd pet
 
-# 1. 三视图 → 多姿态帧 + pet_config.json + icon.ico（加 --preview 出预览图）
+# 1. 三视图 → 4 个基础姿态 + pet_config.json + icon.ico（加 --preview 出预览图）
 $PET_PY build-tools/make_poses.py --sheet assets/deepseek-chan-sheet.jpg \
   --out build/Jingxi --name 鲸汐 --preview
 
-# 2. 气泡字体子集（改了 LINES 台词就必须重跑，否则新字的字形会回退系统字体）
+# 2. 追加走路循环与「被举起」姿态（会同步更新 poses / walk 配置）
+$PET_PY build-tools/add_frames.py --build build/Jingxi \
+  --walk-sheet assets/gen/walk-sheet.png --walk-count 4 \
+  --extra assets/gen/grab-pose.png
+
+# 3. 气泡字体子集（改了 LINES 台词就必须重跑，否则新字的字形会回退系统字体）
 $PET_PY build-tools/make_bubble_font.py --src <霞鹜文楷完整字体.ttf> \
   --out assets/fonts/pet-bubble.ttf
 cp assets/fonts/pet-bubble.ttf build/Jingxi/fonts/
 
-# 3. 打包（--smoke 10 会启动 exe 存活 10 秒作为验收）
+# 4. 打包（--smoke 10 会启动 exe 存活 10 秒作为验收）
 $PET_PY build-tools/build_exe.py --dir build/Jingxi --exe-name Jingxi --smoke 10 --smoke-kill
 ```
 
@@ -123,7 +146,8 @@ $PET_PY build-tools/build_exe.py --dir build/Jingxi --exe-name Jingxi --smoke 10
 | 能力 | 鲸汐 | DeepSeek 娘 |
 |---|---|---|
 | 透明置顶 / 拖拽 / 位置记忆 | ✅ | ✅ |
-| 多姿态切换 | ✅ 4 个姿势（正/侧/背/演唱） | ✅ 多状态动画 |
+| 多姿态切换 | ✅ 9 帧（正/侧/背/演唱/走路×4/被举起） | ✅ 多状态动画 |
+| 自动走动 | ✅ 定时走动、边缘转身、悬停暂停 | ✅ 随机行为链 |
 | 尺寸可调 | ✅ 滚轮无级 + 预设 + 自定义像素 | ✅ 多档 |
 | 待机动画 | ✅ 呼吸 / 漂浮 / 摇摆 / 静止 | ✅ 多状态 + 待机变体轮换 |
 | 戳一戳 / 长按摸头 / 双击 | ✅ | ✅ |

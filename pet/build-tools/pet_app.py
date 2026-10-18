@@ -89,12 +89,15 @@ def load_config():
     # poses 模式：哪个动作对应哪一帧。缺省全用第 0 帧，不至于因配置缺失而崩。
     poses = data.get("poses")
     cfg["poses"] = dict(poses) if isinstance(poses, dict) else {}
+    # 自动走动参数（frames/speed/pause/duration/fps），缺省则不动
+    walk = data.get("walk")
+    cfg["walk"] = dict(walk) if isinstance(walk, dict) else {}
     return cfg
 
 
 def save_config(cfg):
     out = {k: cfg[k] for k in ("name", "image", "mode", "animation", "speed",
-                               "scale", "pos", "autostart", "poses")}
+                               "scale", "pos", "autostart", "poses", "walk")}
     try:
         with open(cfg["_path"], "w", encoding="utf-8") as f:
             json.dump(out, f, ensure_ascii=False, indent=2)
@@ -324,6 +327,15 @@ class PetWidget(QWidget):
         # 姿态交叉淡化：切换瞬间保留上一帧，避免画面「啪」地跳过去
         self._prev_draw = QPixmap()
         self._fade_t0 = 0.0
+        # 自动走动状态
+        self._hovering = False
+        self._walking = False
+        self._walk_next = time.monotonic() + random.uniform(3.0, 7.0)
+        self._walk_until = 0.0
+        self._walk_dir = 1
+        self._walk_i = 0
+        self._walk_frame_t = 0.0
+        self._flip = False
         self._long_timer = QTimer(self)
         self._long_timer.setSingleShot(True)
         self._long_timer.timeout.connect(self._on_long_press)
@@ -389,10 +401,16 @@ class PetWidget(QWidget):
         return max(0, min(len(self.frames) - 1, idx))
 
     def _set_pose(self, key):
-        """切换姿态帧。所有帧共用同一画布与基线，切换时位置和大小不会跳。"""
+        """按动作名切帧。所有帧共用同一画布与基线，切换时位置和大小不会跳。"""
         if not self.frames:
             return
-        idx = self._pose_index(key)
+        self._show_frame(self._pose_index(key))
+
+    def _show_frame(self, idx):
+        """按帧号切换（走动循环直接用它），带交叉淡化。"""
+        if not self.frames:
+            return
+        idx = max(0, min(len(self.frames) - 1, int(idx)))
         if idx == self.frame_idx:
             return
         # 先留住当前画面，新帧以 alpha 渐入 -> 两帧交叉溶解，而不是硬切
@@ -402,6 +420,75 @@ class PetWidget(QWidget):
         self.base_pix = self.frames[idx]
         self._rescale_draw_pix()
         self.update()
+
+    # ---------- 自动走动 ----------
+
+    def _screen_geo(self):
+        return (QGuiApplication.screenAt(self.frameGeometry().center())
+                or QGuiApplication.primaryScreen()).availableGeometry()
+
+    def _set_flip(self, flip):
+        if flip == self._flip:
+            return
+        self._flip = flip
+        # 转身时直接换朝向，不要交叉淡化（否则会出现左右两个人影）
+        self._prev_draw = QPixmap()
+        self._fade_t0 = 0.0
+        self.update()
+
+    def _walk_tick(self):
+        w = self.cfg.get("walk") or {}
+        frames = w.get("frames") or []
+        if not frames:
+            return
+        # 拖拽 / 悬停 / 正在做反应时都不走：否则会跟用户的鼠标「抢」位置
+        if self._dragging or self._hovering or self._react_kind:
+            if self._walking:
+                # 有反应时不要重置姿态——那会把刚切过去的动作姿势顶掉
+                self._stop_walk(reset_pose=not self._react_kind)
+            return
+        now = time.monotonic()
+        if not self._walking:
+            if now < self._walk_next:
+                return
+            self._walking = True
+            self._walk_dir = random.choice((-1, 1))
+            dur = w.get("duration") or [2.5, 6.0]
+            self._walk_until = now + random.uniform(dur[0], dur[1])
+            self._walk_i = 0
+            self._walk_frame_t = now
+            self._set_flip(self._walk_dir < 0)
+            self._show_frame(int(frames[0]))
+            return
+
+        speed = float(w.get("speed", 46))
+        nx = self.x() + speed * 0.033 * self._walk_dir
+        g = self._screen_geo()
+        left, right = g.left(), g.right() - self.width()
+        if nx <= left or nx >= right:
+            self._walk_dir *= -1
+            self._set_flip(self._walk_dir < 0)
+            nx = min(max(nx, left), right)
+        self.move(int(round(nx)), self.y())
+
+        fps = float(w.get("fps", 7.5))
+        if now - self._walk_frame_t >= 1.0 / fps:
+            self._walk_frame_t = now
+            self._walk_i = (self._walk_i + 1) % len(frames)
+            self._show_frame(int(frames[self._walk_i]))
+
+        if now >= self._walk_until:
+            self._stop_walk()
+
+    def _stop_walk(self, reset_pose=True):
+        self._walking = False
+        pause = (self.cfg.get("walk") or {}).get("pause") or [6, 14]
+        self._walk_next = time.monotonic() + random.uniform(pause[0], pause[1])
+        self._set_flip(False)
+        if reset_pose:
+            self._set_pose("idle")
+        # 走动会改变位置，停顿后落盘（防抖，避免每步都写文件）
+        self._schedule_save()
 
     def _start_movie(self):
         try:
@@ -460,6 +547,7 @@ class PetWidget(QWidget):
 
     def _tick(self):
         self.t += 0.033 * self.cfg["speed"]
+        self._walk_tick()
         self.update()
 
     def _on_movie_frame(self, _frame):
@@ -500,6 +588,9 @@ class PetWidget(QWidget):
         if self._dragging:
             sx, sy = sx * 1.04, sy * 0.96
         p.translate(self.width() / 2.0, self.height())
+        # 朝左走时水平镜像：素材只有一个朝向，转身靠翻转实现
+        if self._flip:
+            p.scale(-1.0, 1.0)
         if rot:
             p.rotate(rot)
         p.scale(sx, sy)
@@ -531,6 +622,9 @@ class PetWidget(QWidget):
     def mousePressEvent(self, ev):
         if ev.button() != Qt.MouseButton.LeftButton:
             return
+        # 按住即停：否则拖拽时窗口还在自己跑，手感像在抢鼠标
+        if self._walking:
+            self._stop_walk(reset_pose=False)
         self._dragging = True
         self._moved = False
         self._handled = False
@@ -572,6 +666,15 @@ class PetWidget(QWidget):
             self._long_timer.stop()
             self._handled = True
             self._react("double")
+
+    def enterEvent(self, ev):
+        # 悬停即暂停走动：方便点她，也避免「手一放上去她就跑」
+        self._hovering = True
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):
+        self._hovering = False
+        super().leaveEvent(ev)
 
     def moveEvent(self, ev):
         super().moveEvent(ev)
