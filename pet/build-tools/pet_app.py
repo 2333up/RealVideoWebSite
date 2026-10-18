@@ -83,12 +83,15 @@ def load_config():
     pos = data.get("pos")
     cfg["pos"] = [int(pos[0]), int(pos[1])] if isinstance(pos, (list, tuple)) and len(pos) == 2 else None
     cfg["autostart"] = bool(data.get("autostart", False))
+    # poses 模式：哪个动作对应哪一帧。缺省全用第 0 帧，不至于因配置缺失而崩。
+    poses = data.get("poses")
+    cfg["poses"] = dict(poses) if isinstance(poses, dict) else {}
     return cfg
 
 
 def save_config(cfg):
     out = {k: cfg[k] for k in ("name", "image", "mode", "animation", "speed",
-                               "scale", "pos", "autostart")}
+                               "scale", "pos", "autostart", "poses")}
     try:
         with open(cfg["_path"], "w", encoding="utf-8") as f:
             json.dump(out, f, ensure_ascii=False, indent=2)
@@ -200,7 +203,9 @@ class SpeechBubble(QWidget):
         fm = QFontMetrics(self._font)
         need = fm.boundingRect(0, 0, self.MAX_W, 4000,
                                int(Qt.TextFlag.TextWordWrap), text)
-        w = max(76, need.width() + self.PAD_X * 2)
+        # +6 的余量不是拍脑袋：绘制区宽度若恰好等于测量宽度，任何一次取整
+        # 都会让最后一行被挤到第二行，而高度只留了一行 -> 文字被裁掉半行。
+        w = max(76, need.width() + self.PAD_X * 2 + 6)
         h = need.height() + self.PAD_Y * 2 + self.TAIL
         self.resize(w, h)
         self.setWindowOpacity(1.0)
@@ -287,9 +292,11 @@ class PetWidget(QWidget):
         if self.movie:
             self._start_movie()
         elif self.cfg["mode"] == "frames" and len(self.frames) > 1:
+            # frames 模式：自动轮播（旧行为，保持不动）
             self.frame_timer = QTimer(self)
             self.frame_timer.timeout.connect(self._next_frame)
             self.frame_timer.start(120)
+        # poses 模式不轮播：由互动事件决定显示哪一帧，见 _set_pose()
 
     # ---------- 素材装载 ----------
 
@@ -312,8 +319,38 @@ class PetWidget(QWidget):
             if not pm.isNull():
                 pixmaps.append(pm)
         if pixmaps:
-            self.frames = pixmaps if self.cfg["mode"] == "frames" else pixmaps[:1]
-            self.base_pix = self.frames[0]
+            # poses 与 frames 都需要保留全部帧；其余模式只取第一张
+            if self.cfg["mode"] in ("frames", "poses"):
+                self.frames = pixmaps
+            else:
+                self.frames = pixmaps[:1]
+            if self.cfg["mode"] == "poses":
+                self.frame_idx = self._pose_index("idle")
+                self.base_pix = self.frames[self.frame_idx]
+            else:
+                self.base_pix = self.frames[0]
+
+    def _pose_index(self, key):
+        """把动作名映射成帧序号，并夹在合法范围内（配置写错也不至于崩）。"""
+        if not self.frames:
+            return 0
+        try:
+            idx = int(self.cfg.get("poses", {}).get(key, 0))
+        except (TypeError, ValueError):
+            idx = 0
+        return max(0, min(len(self.frames) - 1, idx))
+
+    def _set_pose(self, key):
+        """切换姿态帧。所有帧共用同一画布与基线，切换时位置和大小不会跳。"""
+        if not self.frames:
+            return
+        idx = self._pose_index(key)
+        if idx == self.frame_idx:
+            return
+        self.frame_idx = idx
+        self.base_pix = self.frames[idx]
+        self._rescale_draw_pix()
+        self.update()
 
     def _start_movie(self):
         try:
@@ -441,6 +478,8 @@ class PetWidget(QWidget):
             self._moved = True
             # 一旦开始拖拽就别再判摸头，否则「拖远了停住」会误触
             self._long_timer.stop()
+            if self.cfg["mode"] == "poses":
+                self._set_pose("drag")
         self.move(cur - self._drag_off)
 
     def mouseReleaseEvent(self, ev):
@@ -450,6 +489,8 @@ class PetWidget(QWidget):
         self._long_timer.stop()
         elapsed = (time.monotonic() - self._press_ms) * 1000
         if self._moved:
+            if self.cfg["mode"] == "poses":
+                self._set_pose("idle")
             self._save_pos()
             return
         # 无位移：短按 = 戳一戳；长按已由计时器处理过，这里不再重复触发
@@ -483,6 +524,10 @@ class PetWidget(QWidget):
         self._react_t0 = time.monotonic()
         # 摸头是连跳三下，戳一戳是单次弹跳
         self._react_dur = 1.15 if kind == "pat" else 0.62
+        # 多姿态模式下顺带换一帧：戳/摸头用开心姿势，双击转身。
+        # "talk" 不换姿势，只说话。
+        if self.cfg["mode"] == "poses" and kind != "talk":
+            self._set_pose(kind)
         self.bubble.say(random.choice(lines))
         self._place_bubble()
         self.update()
@@ -494,6 +539,9 @@ class PetWidget(QWidget):
         p = (time.monotonic() - self._react_t0) / max(self._react_dur, 1e-3)
         if p >= 1.0:
             self._react_kind = ""
+            # 动作演完回到待机姿态（拖拽中保持侧身，松手才归位）
+            if self.cfg["mode"] == "poses" and not self._dragging:
+                self._set_pose("idle")
             return 0.0, 1.0, 1.0, 0.0
         if self._react_kind == "pat":
             # squash & stretch：压扁回弹 + 左右轻晃，比整体缩放更像活物
