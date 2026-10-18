@@ -174,9 +174,13 @@ LINES = {
 LONG_PRESS_MS = 700   # 按住超过这个时长算「摸头」
 CLICK_SLOP = 4        # 位移小于该像素仍视为点击（区分拖拽）
 # 姿态切换的交叉淡化时长（秒）。
-# 太短 = 硬切（原问题）；太长 = 两张全身像叠太久，看起来像重影/穿模。
-# 130ms 约 4 帧，读起来是「快速转身」而不是「故障闪一下」。
-POSE_FADE_S = 0.13
+#
+# ⚠️ 这里有两个必须分清的场景：
+#   1. **换姿势**（站立 -> 举手 / 被举起）：需要一点过渡，否则硬切会「闪」。
+#   2. **逐帧动画**（走路循环）：**绝不能淡化**。走路的换帧间隔只有 1/fps≈133ms，
+#      而淡化也要 100ms 以上，等于上一帧还没淡完下一帧就来了 —— 全程半透明叠加，
+#      看起来就是持续重影/穿模。sprite 动画本来就应该硬切。
+POSE_FADE_S = 0.09
 
 # 气泡用随包分发的手写体（霞鹜文楷子集，OFL 授权）。
 # 只打包台词里用到的字，约 53KB；缺失时回退系统字体，不影响功能。
@@ -406,16 +410,21 @@ class PetWidget(QWidget):
             return
         self._show_frame(self._pose_index(key))
 
-    def _show_frame(self, idx):
-        """按帧号切换（走动循环直接用它），带交叉淡化。"""
+    def _show_frame(self, idx, fade=True):
+        """按帧号切换。fade=False 用于逐帧动画（走路），那种情况必须硬切。"""
         if not self.frames:
             return
         idx = max(0, min(len(self.frames) - 1, int(idx)))
         if idx == self.frame_idx:
             return
-        # 先留住当前画面，新帧以 alpha 渐入 -> 两帧交叉溶解，而不是硬切
-        self._prev_draw = self.draw_pix
-        self._fade_t0 = time.monotonic()
+        if fade:
+            # 先留住当前画面，新帧以 alpha 渐入 -> 两帧交叉溶解，而不是硬切
+            self._prev_draw = self.draw_pix
+            self._fade_t0 = time.monotonic()
+        else:
+            # 逐帧动画：直接换图，不留上一帧，否则每 133ms 叠一次旧姿势 = 重影
+            self._prev_draw = QPixmap()
+            self._fade_t0 = 0.0
         self.frame_idx = idx
         self.base_pix = self.frames[idx]
         self._rescale_draw_pix()
@@ -475,7 +484,8 @@ class PetWidget(QWidget):
         if now - self._walk_frame_t >= 1.0 / fps:
             self._walk_frame_t = now
             self._walk_i = (self._walk_i + 1) % len(frames)
-            self._show_frame(int(frames[self._walk_i]))
+            # 逐帧动画必须硬切：淡化会和下一帧重叠成重影
+            self._show_frame(int(frames[self._walk_i]), fade=False)
 
         if now >= self._walk_until:
             self._stop_walk()
