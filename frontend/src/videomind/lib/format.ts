@@ -20,6 +20,22 @@ export function formatDuration(seconds: number): string {
 }
 
 /**
+ * 秒 -> 01:46:48 / 13:07 / 53s，专给「宽高都紧张」的地方用（视频行的时长列）。
+ *
+ * 和人话版的区别：这里是**定宽数字**，1:46:48 只占 7 个字符宽，
+ * 而「1 小时 46 分」要 7 个汉字宽——在 256px 的左栏里，那一行
+ * 能多出来的 20px 正好还给标题。人话版留给 tooltip。
+ */
+export function formatDurationShort(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds || 0))
+  const pad = (n: number) => String(n).padStart(2, '0')
+  if (s < 60) return `${s}s`
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  return h > 0 ? `${h}:${pad(m)}:${pad(s % 60)}` : `${m}:${pad(s % 60)}`
+}
+
+/**
  * 秒 -> 「3 分 12 秒」这类精度到秒的耗时说明。
  *
  * 和 formatDuration 的区别：那个用于「视频有多长」，分钟级足够；

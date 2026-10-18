@@ -57,6 +57,10 @@ export interface LaidOutNode {
   id: string
   label: string
   start: number | null
+  /** 时间范围终点；没有时段（分类节点）时为 null */
+  end: number | null
+  /** 1-2 句话的内容摘要，可能为空 */
+  summary: string
   depth: number
   x: number
   y: number
@@ -71,9 +75,21 @@ export interface LaidOutNode {
   /** 该分支的总色（含根节点，根节点用 ROOT_COLOR） */
   color: string
   hasChildren: boolean
+  /**
+   * 有至少一个**非笔记**子节点（也就是时间范围真是由子节点算出来的）。
+   *
+   * 与 hasChildren 的区别只在「子节点全是笔记」时：那种情况下父节点的时间
+   * 仍归自己管（后端 derive_parent_ranges 也保留它），所以「时间」按钮不能锁死——
+   * 否则「给一个还没设时间的叶子加条笔记」会让它永远设不了时间。
+   */
+  timedChildren: boolean
   collapsed: boolean
   /** 折叠时被藏起来的后代数量，显示在折叠圆点上 */
   hiddenCount: number
+  /** 笔记节点：不挂时间轴，节点上显示「笔记」而不是时间 */
+  note: boolean
+  /** 这个节点带 Markdown 笔记（节点上会显示一个小标记，和没笔记的区分开） */
+  hasNote: boolean
 }
 
 export interface LayoutResult {
@@ -113,11 +129,30 @@ export interface MindViewActions {
   beginEdit: (id: string, field: 'label' | 'time') => void
   cancelEdit: () => void
   commitLabel: (id: string, label: string) => void
-  commitTime: (id: string, seconds: number | null) => void
+  /**
+   * 提交节点的时间范围。
+   *
+   * start 为 null 表示清掉这个节点的时间戳（end 必须跟着一起清）；
+   * end 为 null 表示「只标起点」，终点仍由下一个节点的位置推断。
+   */
+  commitRange: (id: string, start: number | null, end: number | null) => void
   addChild: (id: string) => void
   addSibling: (id: string) => void
+  /** 在选中节点下挂一条笔记（不发请求就能看到，后续由 commit 落库） */
+  addNote: (id: string) => void
   remove: (id: string) => void
   rescale: (id: string, delta: number) => void
+  /**
+   * 鼠标拖动缩放手柄时的**实时预览**：只写内存里的临时尺寸，不写树。
+   *
+   * 为什么必须实时：松开才变的话，拖动过程中只能看到一个虚框，
+   * 完全不知道「放大到这个程度字会不会换行」。传 null 表示清掉预览。
+   */
+  previewScale: (id: string, scale: number | null) => void
+  /** 松手时把最终尺寸写回树并保存 */
+  commitScale: (id: string, scale: number) => void
+  /** 打开某个节点的 Markdown 笔记面板（并选中它） */
+  openNote: (id: string) => void
   toggleCollapse: (id: string) => void
   /** 连同所有后代一并折叠（节点上 Shift+点击） */
   collapseDeep: (id: string) => void
@@ -139,6 +174,14 @@ export interface LayoutOptions {
    * 存绝对值的话一折叠手动摆好的节点就飞走了；存相对偏移则跟着整条分支一起挪。
    */
   offsets?: ReadonlyMap<string, { dx: number; dy: number }>
+  /**
+   * 拖拽缩放手柄时的临时缩放系数，覆盖树里存的 scale。
+   *
+   * 直接把预览塞进布局计算（而不是用 CSS transform 临时放大），
+   * 是为了让**连线、与邻节点的间距也一起跟着变**——松开手那一瞬间
+   * 画面不会突然跳一下。节点只有几十个，每帧重算布局的开销可以忽略。
+   */
+  scaleOverride?: ReadonlyMap<string, number>
 }
 
 const CJK_RE = /[一-龥　-〿＀-￯]/
@@ -164,6 +207,8 @@ interface RawEntry {
   id: string
   label: string
   start: number | null
+  end: number | null
+  summary: string
   depth: number
   parentId: string | null
   branch: number
@@ -175,6 +220,10 @@ interface RawEntry {
   y: number
   childIds: string[]
   descendants: number
+  note: boolean
+  /** 非笔记子节点的个数：0 表示它没有「按子节点算范围」的情况 */
+  timedKids: number
+  hasNote: boolean
 }
 
 export function layoutMindMap(tree: MindMapNode, options: LayoutOptions = {}): LayoutResult {
@@ -197,33 +246,59 @@ export function layoutMindMap(tree: MindMapNode, options: LayoutOptions = {}): L
     branch: number,
     side: -1 | 0 | 1,
   ): string {
-    const scale = typeof node.scale === 'number' && node.scale > 0 ? node.scale : 1
     const id = node.id || `n${seq}`
     seq += 1
+    const scale =
+      options.scaleOverride?.get(id) ??
+      (typeof node.scale === 'number' && node.scale > 0 ? node.scale : 1)
+    const note = node.kind === 'note'
+    const hasNote = !!(node.note && node.note.trim())
+    const hasEnd = typeof node.end === 'number' && node.end > (node.start ?? 0)
     const e: RawEntry = {
       id,
       label: node.label,
-      start: node.start ?? null,
+      // 笔记节点一律不显示时间（后端也会把它的 start/end 清掉，
+      // 这里再兜一道，防止上一份缓存里还挂着旧值）
+      start: note ? null : (node.start ?? null),
+      end: note ? null : hasEnd ? (node.end as number) : null,
+      summary: node.summary ?? '',
       depth,
       parentId,
       branch,
       side,
       scale,
-      width: estimateWidth(node.label, scale, depth === 0 ? 112 : 70),
+      // 带终点的时间徽章比单个起点宽出一截（「12:30–15:00」），
+      // 不预留的话标签会被挤到提前截断。笔记节点只显示两个字，留得少些；
+      // 带 Markdown 笔记的节点还要多留一个小图标的宽度。
+      width: estimateWidth(
+        node.label,
+        scale,
+        (note ? 62 : depth === 0 ? 112 : hasEnd ? 100 : 70) + (hasNote ? 14 : 0),
+      ),
       height: Math.round((depth === 0 ? ROOT_H : NODE_H) * scale),
       x: 0,
       y: 0,
       childIds: [],
       descendants: 0,
+      note,
+      timedKids: 0,
+      hasNote,
     }
     entries.push(e)
     byId.set(id, e)
     const kids = node.children ?? []
+    e.timedKids = kids.filter((k) => k.kind !== 'note').length
     kids.forEach((kid, i) => {
-      // 一级分支左右交替：偶数序号向右、奇数向左。
-      // 交替（而不是「前半右后半左」）能让两侧高度始终接近，
-      // 不会一边挤成一摞、另一边空半屏。
-      const kidSide: -1 | 0 | 1 = depth === 0 ? (i % 2 === 0 ? 1 : -1) : side
+      /**
+       * 一级分支一律向右（2026-10-18 用户要求）。
+       *
+       * 之前是左右交替：偶数序号往右、奇数往左，好处是两侧高度接近；
+       * 但读起来是「从中间向两边长」，跟大纲「从上往下、从左往右」的直觉相反，
+       * 而且视线要在根节点左右来回跳。现在统一从左到右展开——
+       * 根在左、层级往右递进，和绝大多数知识树的读法一致。
+       * 深层节点跟着父节点走（继承 side），所以整棵树只有一个方向。
+       */
+      const kidSide: -1 | 0 | 1 = 1
       const kidBranch = depth === 0 ? i : branch
       e.childIds.push(build(kid, depth + 1, id, kidBranch, kidSide))
     })
@@ -383,8 +458,9 @@ export function layoutMindMap(tree: MindMapNode, options: LayoutOptions = {}): L
     }
   }
 
-  // 两侧各自从 0 开始堆，堆完再把整摞挪到以根为中心——
-  // 这样根始终落在整张图的垂直中心，左右两摞各自向上下对称展开。
+  // 每一侧各自从 0 开始堆，堆完再把整摞挪到以根为中心。
+  // 现在所有分支都在右侧，这个循环实际上只跑 side=1 一趟；
+  // 保留 -1 分支是为了折叠/聚焦等边缘情形仍能正确落位，不额外增加维护成本。
   for (const side of [1, -1] as const) {
     const roots = (byId.get(rootId)?.childIds ?? []).filter(
       (c) => visibleIds.has(c) && byId.get(c)?.side === side,
@@ -444,6 +520,8 @@ export function layoutMindMap(tree: MindMapNode, options: LayoutOptions = {}): L
     id: e.id,
     label: e.label,
     start: e.start,
+    end: e.end,
+    summary: e.summary,
     depth: e.depth,
     x: e.x,
     y: e.y,
@@ -455,8 +533,11 @@ export function layoutMindMap(tree: MindMapNode, options: LayoutOptions = {}): L
     side: e.side,
     color: branchColorOf(e.branch),
     hasChildren: e.childIds.length > 0,
+    timedChildren: e.timedKids > 0,
     collapsed: isCollapsed(e.id),
     hiddenCount: isCollapsed(e.id) ? e.descendants : 0,
+    note: e.note,
+    hasNote: e.hasNote,
   }))
 
   const hiddenCount = entries.length - visible.length
