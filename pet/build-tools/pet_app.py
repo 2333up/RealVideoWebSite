@@ -66,7 +66,10 @@ def load_config():
     data = {}
     if os.path.exists(path):
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            # utf-8-sig：配置文件可能被记事本 / PowerShell 保存成带 BOM 的 UTF-8，
+            # 用 plain utf-8 读会因 BOM 解析失败而**静默回落到默认配置**，
+            # 表现为「改了配置没生效、形象变回默认」这种很难查的现象。
+            with open(path, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
         except (OSError, ValueError) as exc:
             print("pet_config.json 解析失败:", exc)
