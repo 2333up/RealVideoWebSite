@@ -36,6 +36,117 @@
   pointer-events: none;
 }
 
+/*
+  播放进度条。
+  用原生 <input type="range"> 而不是自绘 div：原生控件自带键盘操作与
+  无障碍语义（方向键 ±5 秒、Home/End 到头尾、读屏能读成滑块），
+  自绘的话这些要全部重写一遍。这里只改外观。
+*/
+.vm-seek {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 14px; /* 可点区域 14px，轨道本身只有 3px——细看是细条，点起来是好点的 */
+  background: transparent;
+  cursor: pointer;
+}
+
+.vm-seek::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 999px;
+  /* 已播部分由内联 style 的两段渐变着色：--played 是百分比 */
+  background: linear-gradient(
+    to right,
+    #fff 0 var(--played, 0%),
+    rgba(255, 255, 255, 0.32) var(--played, 0%) 100%
+  );
+}
+
+.vm-seek::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 11px;
+  height: 11px;
+  margin-top: -4px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  opacity: 0; /* 平时只显示细条，鼠标进来才露出滑块（与 YouTube 一致） */
+  transition: opacity 0.12s;
+}
+
+.vm-seek:hover::-webkit-slider-thumb {
+  opacity: 1;
+}
+
+.vm-seek::-moz-range-track {
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.32);
+}
+
+.vm-seek::-moz-range-progress {
+  height: 3px;
+  border-radius: 999px;
+  background: #fff;
+}
+
+.vm-seek::-moz-range-thumb {
+  width: 11px;
+  height: 11px;
+  border: none;
+  border-radius: 50%;
+  background: #fff;
+}
+
+/* 音量滑块：常显，但比进度条更细 */
+.vm-vol {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 12px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.vm-vol::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    #fff 0 var(--played, 100%),
+    rgba(255, 255, 255, 0.32) var(--played, 100%) 100%
+  );
+}
+
+.vm-vol::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 9px;
+  height: 9px;
+  margin-top: -3px;
+  border-radius: 50%;
+  background: #fff;
+}
+
+.vm-vol::-moz-range-track {
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.32);
+}
+
+.vm-vol::-moz-range-progress {
+  height: 3px;
+  border-radius: 999px;
+  background: #fff;
+}
+
+.vm-vol::-moz-range-thumb {
+  width: 9px;
+  height: 9px;
+  border: none;
+  border-radius: 50%;
+  background: #fff;
+}
+
 /* 细滚动条，避免侧栏出现粗重的系统滚动条 */
 .thin-scroll::-webkit-scrollbar {
   width: 8px;
@@ -50,3 +161,88 @@
 .thin-scroll::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* ------------------------------------------------------------------ 节点笔记的 Markdown 渲染
+ *
+ * 右栏只有 460px 宽，所以这里的排版不是「文章级」的：
+ * 标题只比正文大一点点，段间距 6px，代码块横向滚动不换行——
+ * 目标是「一眼扫得清结构、不用来回滚」，不是做成一篇文章。
+ * 只覆盖 react-markdown 会产出的标签，不多加类名。
+ */
+.vm-md {
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: #334155;
+  word-break: break-word;
+}
+.vm-md > :first-child { margin-top: 0; }
+.vm-md > :last-child { margin-bottom: 0; }
+.vm-md p { margin: 6px 0; }
+.vm-md h1,
+.vm-md h2,
+.vm-md h3,
+.vm-md h4 {
+  margin: 10px 0 6px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: #0f172a;
+}
+.vm-md h1 { font-size: 16px; }
+.vm-md h2 { font-size: 14.5px; padding-bottom: 3px; border-bottom: 1px solid #eef2f7; }
+.vm-md h3 { font-size: 13.5px; }
+.vm-md h4 { font-size: 12.5px; color: #475569; }
+.vm-md ul,
+.vm-md ol { margin: 6px 0; padding-left: 18px; }
+.vm-md ul { list-style: disc; }
+.vm-md ol { list-style: decimal; }
+.vm-md li { margin: 2px 0; }
+.vm-md li > ul,
+.vm-md li > ol { margin: 2px 0; }
+/* GFM 任务列表：勾选框跟着文字走，别把行高撑开 */
+.vm-md li input[type='checkbox'] {
+  margin-right: 4px;
+  vertical-align: -1px;
+}
+.vm-md li:has(> input[type='checkbox']) { list-style: none; margin-left: -14px; }
+.vm-md code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11.5px;
+  background: #f1f5f9;
+  border-radius: 3px;
+  padding: 1px 4px;
+  color: #be123c;
+}
+.vm-md pre {
+  margin: 8px 0;
+  padding: 8px 10px;
+  background: #f8fafc;
+  border: 1px solid #e8eef5;
+  border-radius: 6px;
+  overflow-x: auto;
+}
+.vm-md pre code {
+  background: none;
+  padding: 0;
+  color: #334155;
+  font-size: 11.5px;
+  white-space: pre;
+}
+.vm-md blockquote {
+  margin: 8px 0;
+  padding: 2px 0 2px 9px;
+  border-left: 3px solid #cbd5e1;
+  color: #64748b;
+}
+.vm-md a { color: #2563eb; text-decoration: underline; text-underline-offset: 2px; }
+.vm-md hr { margin: 10px 0; border: 0; border-top: 1px solid #e2e8f0; }
+.vm-md table {
+  margin: 8px 0;
+  border-collapse: collapse;
+  font-size: 11.5px;
+  display: block;
+  overflow-x: auto;
+}
+.vm-md th,
+.vm-md td { border: 1px solid #e2e8f0; padding: 3px 7px; text-align: left; }
+.vm-md th { background: #f8fafc; font-weight: 600; }
+.vm-md img { max-width: 100%; border-radius: 4px; }

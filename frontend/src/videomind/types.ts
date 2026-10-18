@@ -24,8 +24,32 @@ export interface MindMapNode {
   id?: string
   label: string
   start: number | null
+  /**
+   * 时间范围的终点。和 start 一起构成「这一段讲到哪」。
+   * 分类节点没有自己的时段，start / end 都为 null——界面上就不显示时间，
+   * 「不是每个节点都要显示时间戳」是刻意的，不是数据缺失。
+   */
+  end?: number | null
+  /** 1-2 句话的内容摘要：讲清楚这个节点讲了什么、结论是什么 */
+  summary?: string
+  /**
+   * 节点笔记（**Markdown 原文**）。
+   *
+   * 与 `kind: 'note'` 是两件事：后者是一种「不挂时间轴」的节点类型，
+   * 这里则是任意节点上附带的一段自由文本（读书笔记、待办、链接……）。
+   * 有笔记的节点在画布/大纲上会带一个小图标。
+   */
+  note?: string | null
   /** 节点缩放系数（同时决定字体大小），1 为原始尺寸 */
   scale?: number | null
+  /**
+   * 节点类型。缺省 = 普通节点（挂时间轴）；'note' = 笔记节点。
+   *
+   * 笔记节点是用户自己补的注记，**不挂时间轴**：没有 start / end，
+   * 也不参与兄弟排序、区间瓜分和父节点派生——父节点的时间范围
+   * 不会因为多了一条笔记而改变。它下面的子节点同样是笔记。
+   */
+  kind?: 'note' | null
   /** 用户是否显式设置过时间戳。后端据此决定是否生成对应章节 */
   pinned?: boolean | null
   children?: MindMapNode[]

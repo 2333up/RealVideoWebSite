@@ -111,11 +111,27 @@ check(
 
 const rights = full.nodes.filter((n) => n.side === 1)
 const lefts = full.nodes.filter((n) => n.side === -1)
-check('一级分支分摊到两侧', rights.length > 0 && lefts.length > 0, `右 ${rights.length} 左 ${lefts.length}`)
+// 2026-10-18 起改成**从左往右单向展开**（用户要求）：根在最左，层级往右递进，
+// 不再左右双向发散。左侧分支数必须为 0，且所有节点都在根的右边。
+check('所有节点都在右侧（单向展开）', lefts.length === 0, `右 ${rights.length} 左 ${lefts.length}`)
 check(
-  '根节点左右都有子节点（双向发散）',
-  full.nodes.some((n) => n.parentId === 'n0' && n.side === 1) &&
-    full.nodes.some((n) => n.parentId === 'n0' && n.side === -1),
+  '一级分支都挂在根节点右侧',
+  full.nodes.filter((n) => n.parentId === 'n0').every((n) => n.side === 1),
+)
+check(
+  '深度越大越靠右',
+  (() => {
+    const byDepth = new Map()
+    for (const n of full.nodes) {
+      const cur = byDepth.get(n.depth)
+      if (cur === undefined || n.x < cur) byDepth.set(n.depth, n.x)
+    }
+    const depths = [...byDepth.keys()].sort((a, b) => a - b)
+    for (let i = 1; i < depths.length; i += 1) {
+      if (!(byDepth.get(depths[i]) > byDepth.get(depths[i - 1]))) return false
+    }
+    return true
+  })(),
 )
 
 const branchColors = new Set(

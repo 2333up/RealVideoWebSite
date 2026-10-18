@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { api } from '../api'
+import { FolderIcon, MIN_TAPPABLE, VideoIcon } from './icons'
 
 interface Props {
   /** 本机能不能弹原生对话框；不能时自动退回手工粘贴路径 */
@@ -11,6 +12,12 @@ interface Props {
   onPickFiles: (paths: string[]) => void
   onPickFolder: (dir: string) => void
   onPastePath: (path: string) => void
+  /**
+   * 宽面板：两个导入按钮并排、按钮也长高。
+   * 窄的时候（200-300px）上下摞着更紧凑；一旦左栏拉到 400px 以上，
+   * 还摞着就变成两条横幅，宽度全浪费了。
+   */
+  wide?: boolean
 }
 
 /**
@@ -30,6 +37,7 @@ export default function ImportPanel({
   onPickFiles,
   onPickFolder,
   onPastePath,
+  wide = false,
 }: Props) {
   const [showManual, setShowManual] = useState(false)
   const [raw, setRaw] = useState('')
@@ -57,22 +65,35 @@ export default function ImportPanel({
     <div className="p-3 border-b border-gray-100">
       {pickerAvailable ? (
         <>
-          <button
-            onClick={() => pickAndImport('file')}
-            disabled={disabled}
-            className="w-full px-3 py-2 rounded bg-blue-600 text-white text-xs font-medium hover:bg-blue-500 disabled:opacity-40 flex items-center justify-center gap-1.5"
-          >
-            <span>📁</span>
-            {picking === 'file' ? '等待选择…' : '选择视频文件导入'}
-          </button>
-          <button
-            onClick={() => pickAndImport('folder')}
-            disabled={disabled}
-            className="mt-1.5 w-full px-3 py-1.5 rounded border border-gray-300 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-40 flex items-center justify-center gap-1.5"
-          >
-            <span>📂</span>
-            {picking === 'folder' ? '等待选择…' : '选择文件夹批量导入'}
-          </button>
+          {/* 宽面板并排、窄面板上下摞：两种宽度各有各的浪费法，
+              横着摊和竖着码要跟着面板走 */}
+          <div className={wide ? 'grid grid-cols-2 gap-2' : ''}>
+            <button
+              onClick={() => pickAndImport('file')}
+              disabled={disabled}
+              className={[
+                'w-full px-3 rounded bg-blue-600 text-white font-medium hover:bg-blue-500 disabled:opacity-40 flex items-center justify-center gap-1.5',
+                wide ? 'py-2.5 text-[13px]' : 'py-2 text-xs',
+              ].join(' ')}
+            >
+              {/* 图标在这类「图标 + 文字」按钮里是装饰，不承担点击，
+                  所以尺寸跟着文字走（16px），按钮本身高 32px 已远超触控下限 */}
+              <VideoIcon size={wide ? 17 : 16} />
+              {picking === 'file' ? '等待选择…' : '选择视频文件导入'}
+            </button>
+            <button
+              onClick={() => pickAndImport('folder')}
+              disabled={disabled}
+              className={[
+                'w-full px-3 rounded border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-40 flex items-center justify-center gap-1.5',
+                wide ? 'py-2.5 text-[13px]' : `text-xs ${MIN_TAPPABLE}`,
+                wide ? '' : 'mt-1.5',
+              ].join(' ')}
+            >
+              <FolderIcon size={wide ? 17 : 16} />
+              {picking === 'folder' ? '等待选择…' : '选择文件夹批量导入'}
+            </button>
+          </div>
           <p className="text-[10px] text-gray-400 mt-1.5 leading-relaxed">
             弹窗由本机系统提供，可多选；文件夹会顺带按目录名建一个同名分类。
             只登记路径不复制文件，不额外占用磁盘。
@@ -86,7 +107,7 @@ export default function ImportPanel({
           {!showManual && (
             <button
               onClick={() => setShowManual(true)}
-              className="mt-1.5 w-full px-3 py-1.5 rounded border border-gray-300 text-xs hover:bg-gray-50"
+              className={`mt-1.5 w-full px-3 rounded border border-gray-300 text-xs hover:bg-gray-50 ${MIN_TAPPABLE}`}
             >
               手工粘贴路径
             </button>
@@ -117,7 +138,7 @@ export default function ImportPanel({
               setRaw('')
             }}
             disabled={!raw.trim() || busy}
-            className="mt-1 w-full px-3 py-1.5 rounded bg-blue-600 text-white text-xs hover:bg-blue-500 disabled:opacity-40"
+            className={`mt-1 w-full px-3 rounded bg-blue-600 text-white text-xs hover:bg-blue-500 disabled:opacity-40 ${MIN_TAPPABLE}`}
           >
             {busy ? '导入中…' : '导入'}
           </button>

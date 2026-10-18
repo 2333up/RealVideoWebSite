@@ -126,13 +126,29 @@ if (modalReady) {
 // ================= C. video-mind：合并后冒烟 =================
 console.log('\n[C] video-mind 路由与导图')
 await page.goto(BASE + '/videomind/', { waitUntil: 'networkidle' })
+// 布局是持久化在 localStorage 里的：上一轮（或手工调试）把左右栏折叠过，
+// 这一轮打开就只剩两条窄条，列表一行都没有。先清掉再刷新，保证从默认布局开始。
+await page.evaluate(() => localStorage.removeItem('video-mind:layout.v1'))
+await page.reload({ waitUntil: 'networkidle' })
 await page.waitForTimeout(2000)
-const rows = await page.locator('aside div.cursor-pointer').count()
+// 默认只展开「未分类」，其余分类要先展开才看得到里面的视频
+for (let pass = 0; pass < 6; pass += 1) {
+  await page.evaluate(() => {
+    for (const r of document.querySelectorAll('[data-panel="left"] [data-folder-row][data-expanded="false"]')) {
+      r.click()
+    }
+  })
+  await page.waitForTimeout(200)
+}
+const rows = await page.locator('[data-panel="left"] div.cursor-pointer').count()
 check('视频列表渲染', rows > 0, `${rows} 行`)
 let openedTitle = ''
 try {
   openedTitle = await page.evaluate(() => {
-    const rs = [...document.querySelectorAll('aside div.cursor-pointer')]
+    // 只认视频行：分类行也带 cursor-pointer，点它只是展开/折叠
+    const rs = [...document.querySelectorAll('[data-panel="left"] div.cursor-pointer')].filter(
+      (x) => !x.hasAttribute('data-folder-row'),
+    )
     const r = rs.find((x) => x.textContent.includes('已完成')) ?? rs[0]
     if (!r) return ''
     const t = r.querySelector('.truncate')?.textContent ?? ''

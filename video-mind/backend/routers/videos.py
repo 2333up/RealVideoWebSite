@@ -22,6 +22,8 @@ from core.database import get_db
 from core.media_types import MIME_BY_EXT, VIDEO_EXT, is_video_file
 from core.models import Chapter, Folder, MindMap, Transcript, Video
 from pipeline import mindmap as mindmap_ops
+from pipeline.summarize import rewrite_summary
+from providers.llm import LLMError
 from routers import usage as usage_router
 # 文件夹相关的纯逻辑放在 folders 模块里统一维护（那里也对外暴露同名接口）
 from routers.folders import folder_to_dict, get_or_create_folder
@@ -33,6 +35,20 @@ router = APIRouter(prefix="/api/videos", tags=["videos"])
 # 以及原生选择对话框的 Filter——漏改一处就会「明明支持却选不到/播不了」。
 
 CHUNK_SIZE = 1024 * 1024  # 1 MB
+
+# 开放式 Range（`bytes=N-`）单次最多回多少字节。
+#
+# 为什么必须设上限：浏览器找一个 MP4 的 moov 时会先发 `bytes=0-`。
+# 不少文件没有 faststart，moov 在文件**尾部**（本项目就有 489MB 的例子），
+# 浏览器拿到文件头发现 mdat 之后就 abort 掉这个请求、改去请求尾部。
+# 但在它 abort 之前，服务端已经在拼命往外推整个文件了——每次 seek 都白推几百 MB，
+# 攒几条就能把 dev 代理的连接槽占满，表现就是「点了节点，一直加载中」。
+#
+# 回一个有界窗口（RFC 7233 允许只回请求的一部分）之后：浏览器读完这一窗
+# 会自己接着要下一段或直接跳去尾部，播放不受影响，也不会再有几百 MB 的空气流。
+# 客户端**明确**指定了结束位置（`bytes=100-200`）时按它说的来，不夹。
+OPEN_RANGE_CAP = 8 * 1024 * 1024
+
 
 
 # ------------------------------------------------------------------ 序列化
@@ -376,7 +392,7 @@ def stream_video(video_id: int, request: Request, db: Session = Depends(get_db))
         raise HTTPException(404, f"原始文件已不存在：{v.path}")
 
     range_header = request.headers.get("range", "")
-    resp = RangeFileResponse(path, range_header=range_header)
+    resp = RangeFileResponse(path, range_header=range_header, request=request)
 
     if request.method == "HEAD":
         # HEAD 只回头部：复用同样的 Range 解析逻辑，但 Body 为空
@@ -396,13 +412,24 @@ class RangeFileResponse(StreamingResponse):
     而是把 Range 解析结果作为构造参数传进来，在 super().__init__() 之后统一设置头部。
     """
 
-    def __init__(self, path: Path, range_header: str = "", media_type: str | None = None):
+    def __init__(
+        self,
+        path: Path,
+        range_header: str = "",
+        media_type: str | None = None,
+        request: Request | None = None,
+    ):
         self.path = path
         self.file_size = path.stat().st_size
+        self._request = request
         if media_type is None:
             media_type = MIME_BY_EXT.get(path.suffix.lower(), "video/mp4")
 
-        start, end, status = self._parse_range(range_header)
+        start, end, status, open_ended = self._parse_range(range_header)
+        # 开放式区间夹一个窗口：见 OPEN_RANGE_CAP 的注释。
+        # 只在**文件比窗口大**时夹，小文件原样整段返回，少一次往返。
+        if status == 206 and open_ended and end - start + 1 > OPEN_RANGE_CAP:
+            end = start + OPEN_RANGE_CAP - 1
         self._start, self._end = start, end
 
         super().__init__(self._real_iter(), status_code=status, media_type=media_type)
@@ -413,12 +440,15 @@ class RangeFileResponse(StreamingResponse):
         if status == 206:
             self.headers["Content-Range"] = f"bytes {start}-{end}/{self.file_size}"
 
-    def _parse_range(self, range_header: str) -> tuple[int, int, int]:
-        """解析 Range 头，返回 (start, end, status_code)。
+    def _parse_range(self, range_header: str) -> tuple[int, int, int, bool]:
+        """解析 Range 头，返回 (start, end, status_code, 是否开放式区间)。
 
         只处理单区间；多区间（逗号分隔）浏览器播放视频时不会用到，按全量返回。
+        「开放式」指客户端只给了起点（`bytes=N-`）——这时结束位置由服务端定，
+        所以可以夹一个窗口；给了明确终点的是客户端自己的意愿，不夹。
         """
         start, end, status = 0, self.file_size - 1, 200
+        open_ended = False
         m = re.match(r"bytes=(\d*)-(\d*)", (range_header or "").strip())
         if m:
             gs, ge = m.group(1), m.group(2)
@@ -430,6 +460,8 @@ class RangeFileResponse(StreamingResponse):
                     start = max(0, self.file_size - int(ge))
                 if ge and gs:
                     end = min(int(ge), self.file_size - 1)
+                elif gs and not ge:
+                    open_ended = True
             except ValueError:
                 start, end, status = 0, self.file_size - 1, 200
             else:
@@ -438,13 +470,25 @@ class RangeFileResponse(StreamingResponse):
                 if start > end:
                     start = end
                 status = 206
-        return start, end, status
+        return start, end, status, open_ended
 
     async def _real_iter(self):
+        """按块吐文件，并且**感知客户端断开**。
+
+        浏览器 seek 时会立刻 abort 上一个请求。不检查断开的话，
+        异步生成器会继续把剩下的字节读完写进一个已经没人收的 socket——
+        白占 CPU 和磁盘，还要等缓冲区写满才报错退出。
+        每 8 个块（约 8MB）探一次断开，代价可以忽略。
+        """
         with self.path.open("rb") as f:
             f.seek(self._start)
             remaining = self._end - self._start + 1
+            ticks = 0
             while remaining > 0:
+                if self._request is not None:
+                    ticks += 1
+                    if ticks % 8 == 0 and await self._request.is_disconnected():
+                        break
                 chunk = f.read(min(CHUNK_SIZE, remaining))
                 if not chunk:
                     break
@@ -478,6 +522,8 @@ def patch_chapter(
             setattr(c, field, val)
     _assert_valid_range(c, v.duration)
     db.commit()
+    normalize_chapter_ranges(db, video_id)
+    db.commit()
     return {"ok": True, "chapter": chapter_to_dict(c)}
 
 
@@ -487,6 +533,52 @@ class ChapterCreate(BaseModel):
     end: float | None = None
     summary: str = ""
     key_points: list[str] = Field(default_factory=list)
+
+
+@router.post("/{video_id}/chapters/summaries")
+def rewrite_chapter_summaries(video_id: int, db: Session = Depends(get_db)):
+    """按每一章**自己的时间区间**，用该区间的原文重写摘要与要点。
+
+    为什么需要这个接口：章节摘要原本是「分章节那一刻」模型按它自己挑的区间写的，
+    之后区间被导图同步/重排改动过，摘要就和区间对不上了；更常见的是模型顺手把
+    整章的概括贴到某个小节上，读起来像「拿目录冒充这一段的内容」。
+
+    这里只做一件事：只喂这一段的原文，让它只依据这段写。
+    区间里没有可用内容（只有寒暄、静音）时**不编**，保留原摘要并计入 skipped。
+    """
+    v = db.get(Video, video_id)
+    if not v:
+        raise HTTPException(404, "视频不存在")
+    if not v.transcript or not v.transcript.segments:
+        raise HTTPException(400, "还没有转写结果，无法按区间重写摘要")
+
+    chapters = (
+        db.query(Chapter)
+        .filter(Chapter.video_id == video_id)
+        .order_by(Chapter.start)
+        .all()
+    )
+    if not chapters:
+        return {"updated": 0, "skipped": 0, "errors": []}
+
+    segments = v.transcript.segments
+    updated = 0
+    skipped = 0
+    errors: list[str] = []
+    for c in chapters:
+        try:
+            r = rewrite_summary(c.title, segments, c.start, c.end)
+        except LLMError as exc:
+            errors.append(f"「{c.title}」：{exc}")
+            continue
+        if not r["summary"]:
+            skipped += 1
+            continue
+        c.summary = r["summary"]
+        c.key_points = r["key_points"]
+        updated += 1
+    db.commit()
+    return {"updated": updated, "skipped": skipped, "errors": errors}
 
 
 @router.post("/{video_id}/chapters")
@@ -518,6 +610,9 @@ def create_chapter(video_id: int, body: ChapterCreate, db: Session = Depends(get
     _assert_valid_range(c, v.duration)
     db.add(c)
     db.commit()
+    # 新建的这条会插进已有章节之间：全局重排一遍，保证区间不交叉
+    normalize_chapter_ranges(db, video_id)
+    db.commit()
     db.refresh(c)
     return chapter_to_dict(c)
 
@@ -533,6 +628,9 @@ def delete_chapter(video_id: int, chapter_id: int, db: Session = Depends(get_db)
     v, c = _video_and_chapter(db, video_id, chapter_id)
     node_id = c.source_node_id
     db.delete(c)
+    db.commit()
+    # 删掉一条后，前一条的终点还停在原处，会留下一段没人认领的缝隙
+    normalize_chapter_ranges(db, video_id)
     db.commit()
 
     cleared = False
@@ -568,6 +666,12 @@ def patch_mindmap(video_id: int, body: MindMapPatch, db: Session = Depends(get_d
 
     cleaned = clean_mindmap_tree(body.tree, v.duration)
     cleaned = mindmap_ops.ensure_node_ids(cleaned)
+    # 笔记分支先整支摘出时间轴：它不该参与下面的排序，也不该被派生出范围。
+    mindmap_ops.strip_note_times(cleaned)
+    # 手工编辑同样要过一遍时间整理：用户完全可能把两个同级节点设成同一个时间。
+    # 有子节点的节点，其时间范围会在这里被**子节点覆盖**（父节点时间只读、只算），
+    # 所以前端即便传来一个手填的父节点时间，存下来的也是算出来的那份。
+    mindmap_ops.enforce_time_order(cleaned)
 
     # 必须先留一份旧树：判断「这次有没有动过时间戳」靠它。
     # 覆盖之后再读就只剩新树，所有节点都会变成「新节点」，
@@ -582,22 +686,60 @@ def patch_mindmap(video_id: int, body: MindMapPatch, db: Session = Depends(get_d
         mm.tree = cleaned
     db.flush()
 
-    created = updated = removed = 0
-    if body.create_chapters:
-        created, updated = sync_chapters_from_mindmap(db, v, cleaned, previous)
-        removed = drop_orphan_node_chapters(db, v, cleaned)
+    # 章节同步只做一件事：**让已有章节的边界跟着它包含的导图节点走**。
+    # 不新建章节、不删除章节——那是 2026-10-17 之前的老行为，
+    # 代价是旧树盖回新树时章节成批复活，「删除按钮没起作用」的体感一大半来自那里。
+    synced = sync_chapter_bounds(db, video_id, cleaned, previous)
+    if synced:
+        # 章节起点被挪动后可能与前后章节交叉，最后再统一切一遍
+        normalize_chapter_ranges(db, video_id)
 
     db.commit()
     db.refresh(v)
     return {
         "ok": True,
         "tree": v.mindmap.tree if v.mindmap else cleaned,
-        "chapters_created": created,
-        "chapters_updated": updated,
-        "chapters_removed": removed,
+        "chapters_created": 0,
+        "chapters_updated": synced,
+        "chapters_removed": 0,
         "chapters": [
             chapter_to_dict(c) for c in sorted(v.chapters, key=lambda x: x.idx)
         ],
+    }
+
+
+class NodeNotePayload(BaseModel):
+    #: Markdown 原文。空串 = 删掉这条节点的笔记。
+    note: str = ""
+
+
+@router.put("/{video_id}/mindmap/nodes/{node_id}/note")
+def put_node_note(video_id: int, node_id: str, body: NodeNotePayload, db: Session = Depends(get_db)):
+    """保存单个节点的 Markdown 笔记。
+
+    为什么不复用整树 PATCH：那条路径会重跑时间整理（排序、瓜分、父节点派生）
+    并触发章节边界同步——写一条笔记不该动到任何时间戳，也不该让章节跟着抖。
+    这里只改这棵树上这一个节点的 note 字段。
+    """
+    v = db.get(Video, video_id)
+    if not v:
+        raise HTTPException(404, "视频不存在")
+    if not v.mindmap:
+        raise HTTPException(404, "这支视频还没有思维导图")
+
+    # 必须 deepcopy：SQLAlchemy 检测不到 JSON 列的原地修改，改了也不落库
+    tree = copy.deepcopy(v.mindmap.tree)
+    if not mindmap_ops.set_node(tree, node_id, note=body.note):
+        raise HTTPException(404, "节点不存在")
+    v.mindmap.tree = tree
+    db.commit()
+
+    saved = mindmap_ops.find_node(tree, node_id) or {}
+    return {
+        "ok": True,
+        "node_id": node_id,
+        "note": saved.get("note") or "",
+        "max_length": mindmap_ops.MAX_NOTE,
     }
 
 
@@ -679,17 +821,36 @@ def clean_mindmap_tree(raw: dict, duration: float) -> dict:
         label = str(node.get("label") or "").strip()
         if not label:
             return None
+        start = clamp_ts(node.get("start"))
+        end = clamp_ts(node.get("end"))
+        note = str(node.get("kind") or "").strip() == mindmap_ops.NOTE_KIND
         out: dict = {
             "label": label[:mindmap_ops.MAX_LABEL],
-            "start": clamp_ts(node.get("start")),
+            "start": None if note else start,
             "scale": mindmap_ops.clamp_scale(node.get("scale")),
         }
+        # 节点类型必须原样带回：这里重建的是**新字典**，漏一个字段就等于
+        # 「保存一次，笔记节点又变回普通节点了」——历史上摘要就在这儿丢过。
+        if note:
+            out["kind"] = mindmap_ops.NOTE_KIND
+        # 时间范围与摘要是节点的属性，必须原样带回：
+        # 这里是**重建**节点对象的，漏一个字段就等于「保存一次导图，摘要全没了」。
+        if not note and end is not None and start is not None and end > start:
+            out["end"] = end
+        summary = str(node.get("summary") or "").strip()
+        if summary:
+            out["summary"] = summary[:mindmap_ops.MAX_SUMMARY]
+        # 节点笔记（Markdown）同样必须原样带回。这里是**重建**节点对象，
+        # 漏一个字段就等于「保存一次导图，所有笔记全没了」——摘要就在这儿丢过。
+        note_text = str(node.get("note") or "").strip()
+        if note_text:
+            out["note"] = note_text[: mindmap_ops.MAX_NOTE]
         nid = str(node.get("id") or "").strip()
         if nid:
             out["id"] = nid
         # pinned = 用户显式点过「设置时间」。它决定了这个节点要不要生成章节，
-        # 属于用户意图，必须原样保留。
-        if node.get("pinned"):
+        # 属于用户意图，必须原样保留。笔记节点没有时间，自然也没有 pinned。
+        if not note and node.get("pinned"):
             out["pinned"] = True
         kids_raw = node.get("children")
         if isinstance(kids_raw, list) and depth < mindmap_ops.MAX_DEPTH:
@@ -711,6 +872,86 @@ def clean_mindmap_tree(raw: dict, duration: float) -> dict:
 _MISSING = object()
 
 
+def normalize_chapter_ranges(db: Session, video_id: int) -> int:
+    """把整张章节表重新切成互不交叉的区间，返回被调整过的条数。
+
+    这是「章节区间不得交叉」这条硬要求的最终兜底，任何改动过章节的入口
+    都要调一次（新建、编辑、删除、导图同步）。
+
+    为什么必须全局做一遍：
+        章节有两个来源——分析流程生成的粗粒度章节，和导图叶子节点同步来的
+        细粒度章节。两者的粒度天生不同，只想「自己那几条」的话，
+        新插入的一条会插进别人中间，前后章节的时间范围立刻重叠。
+        统一按 start 排序后「前一条的终点 = 后一条的起点」，
+        就把整张表变成一串严丝合缝的区间，无论来源。
+
+    两个刻意的「不做」：
+      - 只把终点**夹到**后一条的起点，不强行延伸到片尾。章节之间留一段
+        没人认领的时间是正常的（片尾字幕就不该算进任何一章），
+        要求「不交叉」，没要求「铺满」。
+      - 只有起点真撞车才推后，其余一律尊重用户/模型给的值。
+    """
+    video = db.get(Video, video_id)
+    if video is None:
+        return 0
+
+    chapters = sorted(
+        db.query(Chapter).filter(Chapter.video_id == video_id).all(),
+        key=lambda c: (c.start, c.idx, c.id),
+    )
+    if not chapters:
+        return 0
+
+    duration = float(video.duration) if video.duration else None
+    prev_start: float | None = None
+    changed = 0
+
+    for i, c in enumerate(chapters):
+        start = float(c.start)
+        if prev_start is not None and start <= prev_start:
+            start = prev_start + mindmap_ops.MIN_TIME_STEP
+        if abs(start - float(c.start)) > 1e-6:
+            c.start = round(start, 2)
+            changed += 1
+        prev_start = start
+
+    # idx 跟着时间走：章节列表按 idx 排序展示，idx 还停在「插入顺序」的话，
+    # 界面上会出现时间来回跳的假象，看起来就像「时间顺序乱了」。
+    #
+    # (video_id, idx) 上有唯一约束，直接原地重排会撞键：
+    # 把 3 号改成 1 的时候，1 还被 2 号占着。所以先整体挪到一个临时区间，
+    # flush 一次腾空位置，再落回真正的序号。
+    renumber = [c for c in chapters if any(c.idx != i for i, c in enumerate(chapters))]
+    if renumber:
+        offset = len(chapters) + 1
+        for i, c in enumerate(chapters):
+            c.idx = offset + i
+        db.flush()
+        for i, c in enumerate(chapters):
+            c.idx = i
+            changed += 1
+        db.flush()
+
+    for i, c in enumerate(chapters):
+        start = float(c.start)
+        end = float(c.end)
+        next_start = float(chapters[i + 1].start) if i + 1 < len(chapters) else None
+
+        # 终点不许越过下一条的起点——这是「不交叉」的全部含义
+        if next_start is not None and end > next_start:
+            end = next_start
+        if end <= start:
+            end = next_start if next_start is not None else (duration if duration else start + 1.0)
+        if end <= start:
+            end = start + 1.0
+
+        if abs(float(c.end) - end) > 1e-6:
+            c.end = round(end, 2)
+            changed += 1
+
+    return changed
+
+
 def sync_chapters_from_mindmap(
     db: Session, v: Video, tree: dict, previous: dict | None
 ) -> tuple[int, int]:
@@ -723,39 +964,79 @@ def sync_chapters_from_mindmap(
     十几条与已有章节重复的条目——这不是帮忙，是添乱。
 
     判定顺序：
-      - 上一次保存里没有这个节点（新节点）→ 建
+      - previous 为空（首次保存）→ 建全部带时间戳的节点
+      - 两棵树 id 大面积对不上（分叉）→ 只信 pinned，绝不批量建
       - 这个节点的时间戳这次被改了 → 建（或更新）
       - 用户显式点过「设置时间」→ 节点带 pinned 标记 → 建
       - 已经存在对应章节 → 始终同步标题与终点，保持跟随节点
 
     幂等性靠 source_node_id：章节按节点 id 认人，反复保存不会重复建。
+
+    分叉检测（后者正是本次事故）：
+        页面里还拿着旧树时点了重新分析，服务端会把导图重新生成（全新 id）；
+        用户随后保存手里的旧树，旧 id 对新树全部 _MISSING——
+        若把 _MISSING 一律当「用户新建节点」，一次保存就能凭空造出 26 条章节。
+        所以先比对新旧树的 id 重合度，重合度低于一半即判定为分叉，
+        分叉树上只有 pinned（用户显式意图）才有资格建章节。
     """
     timed = [(n, d) for n, _p, d in mindmap_ops.iter_nodes(tree) if n.get("start") is not None]
     timed.sort(key=lambda x: float(x[0]["start"]))
 
     prev_starts: dict[str, object] = {}
+    prev_ids: set[str] = set()
     if previous:
         for n, _p, _d in mindmap_ops.iter_nodes(previous):
+            nid = str(n.get("id"))
+            if nid:
+                prev_ids.add(nid)
             prev_starts[str(n.get("id"))] = n.get("start")
+
+    # 分叉检测：incoming 的 id 大半在旧树里找不到，就不是同一份树的演进
+    diverged = False
+    if previous:
+        incoming_ids = {
+            str(n.get("id"))
+            for n, _p, _d in mindmap_ops.iter_nodes(tree)
+            if n.get("id")
+        }
+        if incoming_ids and prev_ids:
+            overlap = len(incoming_ids & prev_ids) / len(incoming_ids)
+            diverged = overlap < 0.5
 
     by_node = {c.source_node_id: c for c in v.chapters if c.source_node_id}
     next_idx = _next_idx(db, v.id)
 
+    # 先把时间点排成严格递增、互不相同的一串，再按「下一条的起点」切区间。
+    # 顺序不能反过来：先用未去重的 start 算 end，两个节点撞在同一个时间点时
+    # 会算出 end == start 的零长区间，紧接着下一条又从同样的 start 开始——
+    # 前后章节的时间范围就交叉了。
+    starts: list[float] = []
+    for node, _depth in timed:
+        s = float(node["start"])
+        if starts and s <= starts[-1]:
+            s = starts[-1] + mindmap_ops.MIN_TIME_STEP
+        starts.append(round(s, 2))
+
+    duration = float(v.duration) if v.duration else None
+
     created = updated = 0
     for i, (node, _depth) in enumerate(timed):
-        start = float(node["start"])
-        end = (
-            float(timed[i + 1][0]["start"])
-            if i + 1 < len(timed)
-            else (float(v.duration) if v.duration else start + 1.0)
-        )
+        start = starts[i]
+        end = starts[i + 1] if i + 1 < len(starts) else (duration if duration else start + 1.0)
         if end <= start:
-            end = float(v.duration) if v.duration and v.duration > start else start + 1.0
+            end = duration if duration and duration > start else start + 1.0
         title = str(node.get("label") or "未命名节点")
 
         nid = str(node.get("id"))
         prev = prev_starts.get(nid, _MISSING)
-        touched = prev is _MISSING or prev != node.get("start") or bool(node.get("pinned"))
+        if diverged:
+            # 两棵树对不上号：只有用户显式 pin 过的节点才有资格建章节。
+            # 「id 没见过」在这种时候不是「新节点」，而是「树分叉了」。
+            touched = bool(node.get("pinned"))
+        else:
+            touched = prev is _MISSING or prev != node.get("start") or bool(
+                node.get("pinned")
+            )
 
         c = by_node.get(nid)
         if c is None:
@@ -809,6 +1090,112 @@ def drop_orphan_node_chapters(db: Session, v: Video, tree: dict) -> int:
             db.delete(c)
             removed += 1
     return removed
+
+
+def _ts_eq(a: object, b: object) -> bool:
+    """时间戳比较：None 与 None 相等，数值留 1e-6 的浮点容差。"""
+    if a is None and b is None:
+        return True
+    if a is None or b is None:
+        return False
+    try:
+        return abs(float(a) - float(b)) < 1e-6  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+
+
+def sync_chapter_bounds(db: Session, video_id: int, tree: dict, previous: dict | None) -> int:
+    """让**已有**章节的边界跟着它包含的导图节点走，返回被调整的章节数。
+
+    规则（用户 2026-10-17 定的粒度）：
+      - 这次保存里，某个节点的时间范围**真的被改过**，它所在的那条章节才动；
+      - 改的若是这条章节里**最靠前**的节点 -> 章节起点跟着它走；
+      - 改的若是这条章节里**最靠后**的节点 -> 章节终点跟着它的终点走；
+      - 只改中间的 -> 章节不变（章节是容器，中间的子话题挪动不改变容器的范围）；
+      - 不新建章节、不删除章节。
+
+    为什么必须以「改动」为触发条件，而不是每次都按节点重算一遍边界：
+        重算会把章节起点吸到「最靠前节点的起点」上。分析产出的章节起点往往
+        早于第一个节点（开头 9 秒是寒暄，不属于任何要点），每次保存都把它
+        前移一次，用户什么都没改，章节却自己动了。
+
+    为什么必须拿旧树做基线：
+        判断「这个节点的时间这次被改了没有」只能靠前后对比。没有基线时
+        （首次保存导图）一律不动章节——凭空猜测用户的意图更糟。
+        同理，旧树里不存在的 id（说明页面拿的是另一份树，比如重新分析前的旧树）
+        一律不参与，避免分叉的树把章节带跑偏。
+    """
+    if previous is None:
+        return 0
+
+    chapters = sorted(
+        db.query(Chapter).filter(Chapter.video_id == video_id).all(),
+        key=lambda c: (float(c.start), c.idx, c.id),
+    )
+    if not chapters:
+        return 0
+
+    prev_ranges: dict[str, tuple[object, object]] = {}
+    for n, _p, _d in mindmap_ops.iter_nodes(previous):
+        nid = str(n.get("id") or "")
+        if nid:
+            prev_ranges[nid] = (n.get("start"), n.get("end"))
+
+    timed: list[dict] = []
+    changed_ids: set[str] = set()
+    for n, _p, _d in mindmap_ops.iter_nodes(tree):
+        nid = str(n.get("id") or "")
+        s = n.get("start")
+        if s is None or not nid:
+            continue
+        timed.append(n)
+        prev = prev_ranges.get(nid)
+        if prev is not None and not (
+            _ts_eq(s, prev[0]) and _ts_eq(n.get("end"), prev[1])
+        ):
+            changed_ids.add(nid)
+
+    if not timed or not changed_ids:
+        return 0
+
+    def locate(t: float) -> int:
+        """这个时间点落在哪条章节里（返回下标）；落在缝隙里就归给起点最近的那条。
+
+        用下标而不是主键分组：新建的章节在 flush 之前 id 还是 None，
+        拿 None 当字典键会把好几条并成一组。
+        """
+        for i, c in enumerate(chapters):
+            if float(c.start) <= t < float(c.end):
+                return i
+        return min(range(len(chapters)), key=lambda i: abs(float(chapters[i].start) - t))
+
+    buckets: list[list[dict]] = [[] for _ in chapters]
+    for n in timed:
+        buckets[locate(float(str(n["start"])))].append(n)
+
+    moved = 0
+    for c, group in zip(chapters, buckets):
+        if not group or not any(str(n.get("id")) in changed_ids for n in group):
+            continue
+
+        earliest = min(group, key=lambda n: float(str(n["start"])))
+        latest = max(
+            group,
+            key=lambda n: float(str(n["end"] if n.get("end") is not None else n["start"])),
+        )
+
+        if str(earliest.get("id")) in changed_ids and not _ts_eq(earliest["start"], c.start):
+            c.start = round(float(str(earliest["start"])), 2)
+            moved += 1
+        if str(latest.get("id")) in changed_ids:
+            e = latest.get("end")
+            if e is not None and not _ts_eq(e, c.end):
+                c.end = round(float(str(e)), 2)
+                moved += 1
+
+    if moved:
+        db.flush()
+    return moved
 
 
 def chapter_to_dict(c: Chapter) -> dict:

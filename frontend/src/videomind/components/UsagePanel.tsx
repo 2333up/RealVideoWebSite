@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
 import type { UsageReport } from '../types'
+import { CloseIcon, IconButton } from './icons'
 
 interface Props {
   onClose: () => void
@@ -60,12 +61,12 @@ export default function UsagePanel({ onClose }: Props) {
         <div className="px-5 py-3.5 border-b border-gray-200 flex items-center shrink-0">
           <h2 className="text-sm font-semibold text-gray-900">大模型用量</h2>
           <span className="text-[11px] text-gray-400 ml-2">按每次调用记录，可随时查看</span>
-          <button
+          <IconButton
+            icon={<CloseIcon size={18} />}
+            label="关闭"
             onClick={onClose}
-            className="ml-auto text-gray-400 hover:text-gray-700 text-lg leading-none"
-          >
-            ×
-          </button>
+            className="ml-auto hover:text-gray-700 hover:bg-gray-100"
+          />
         </div>
 
         <div className="flex-1 overflow-y-auto thin-scroll p-5">

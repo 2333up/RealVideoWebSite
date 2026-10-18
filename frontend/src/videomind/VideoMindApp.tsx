@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 // ReactFlow 的基础布局样式（节点定位、边、缩放控件）。融合后由这里引入，
 // 不再有独立的 main.tsx 负责。
@@ -23,6 +23,14 @@ import ImportPanel from './components/ImportPanel'
 import FolderList from './components/FolderList'
 import PanelResizer from './components/PanelResizer'
 import PanelRail from './components/PanelRail'
+import {
+  ChevronsLeftIcon,
+  ChevronsRightIcon,
+  CloseIcon,
+  IconButton,
+  MIN_TAPPABLE,
+  VideoIcon,
+} from './components/icons'
 import { makeSeekRequest, type SeekRequest } from './lib/seekRequest'
 import { formatElapsed } from './lib/format'
 
@@ -32,7 +40,12 @@ export default function App() {
   // 手里根本没有那份数据。
   const [videos, setVideos] = useState<VideoSummary[]>([])
   const [folders, setFolders] = useState<Folder[]>([])
-  const [activeFolder, setActiveFolder] = useState('')
+  /**
+   * 当前分类。默认停在「未分类」('none')：它是所有新导入视频的落点，
+   * 打开就应该看到东西。没有「全部」这一档——视频按分类归位后再横着拉一张
+   * 全量列表，只会让「这个视频到底属于哪个分类」变得模糊。
+   */
+  const [activeFolder, setActiveFolder] = useState('none')
   const [pickerInfo, setPickerInfo] = useState<PickerInfo | null>(null)
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [detail, setDetail] = useState<VideoDetail | null>(null)
@@ -62,12 +75,32 @@ export default function App() {
   const [rightWidth, setRightWidth] = useState(() => loadLayout().rightWidth)
   const [leftOpen, setLeftOpen] = useState(() => loadLayout().leftOpen)
   const [rightOpen, setRightOpen] = useState(() => loadLayout().rightOpen)
+  // 左栏当前 tab：视频库 / 章节。章节搬到左栏后，两边是「看」和「管」的分工，
+  // 不必跨会话记住——每次进来先看库更自然。
+  const [leftTab, setLeftTab] = useState<'library' | 'chapters'>('library')
+  /** 失败红框的展开/收起：默认展开，收起后只剩一行，不再霸占空间 */
+  const [failExpanded, setFailExpanded] = useState(true)
+  /** 「按区间重写摘要」正在进行：按钮置灰，防止连点重复花钱 */
+  const [rewriting, setRewriting] = useState(false)
 
   const playerRef = useRef<HTMLVideoElement>(null)
+
+  /**
+   * 左栏是否处于「宽」形态。
+   *
+   * 行高、字号、要不要把体积摊到右边，都跟着这个开关走。阈值取 420：
+   * 再窄就还是「尽量多塞几条」的密集模式，再宽就该把空间用起来。
+   */
+  const leftWide = leftWidth >= 420
 
   useEffect(() => {
     saveLayout({ leftWidth, rightWidth, leftOpen, rightOpen })
   }, [leftWidth, rightWidth, leftOpen, rightOpen])
+
+  // 换视频时把失败框恢复展开：上一个视频收起了，不该让下一个也默认藏着原因
+  useEffect(() => {
+    setFailExpanded(true)
+  }, [selectedId])
 
   // ---------------------------------------------------------------- 数据加载
 
@@ -158,6 +191,32 @@ export default function App() {
 
   // ---------------------------------------------------------------- 交互
 
+  const chapterScrollRef = useRef<HTMLDivElement>(null)
+
+  /**
+   * 把包含时间点 t 的章节滚进可视区。
+   *
+   * 章节区独立滚动之后，从导图点节点时目标章节可能远在视口之外——
+   * 视频跳过去了、章节列表却还停在原地，用户会以为是联动失灵。
+   * block:'nearest' 是刻意的：章节本来就在视野里时它一动不动，
+   * 只有真的看不见才滚，避免点一次跳一下的抽搐感。
+   */
+  const scrollChapterIntoView = useCallback(
+    (t: number) => {
+      const box = chapterScrollRef.current
+      const list = detail?.chapters ?? []
+      if (!box || list.length === 0) return
+      const hit =
+        list.find((c) => t >= c.start - 0.01 && t < c.end) ??
+        // 时间点落在章节缝隙里时，退回「最后一个不晚于 t 的章节」
+        [...list].reverse().find((c) => c.start <= t) ??
+        list[0]
+      const el = box.querySelector<HTMLElement>(`[data-chapter-id="${hit.id}"]`)
+      el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    },
+    [detail],
+  )
+
   /**
    * 三向联动的终点：章节、导图、逐字稿的点击全部汇聚到这里。
    *
@@ -165,18 +224,27 @@ export default function App() {
    * 由 VideoPlayer 负责真正执行（它才知道 metadata 是否就绪）。
    * 传 endSeconds 时，播放器会在该时刻自动暂停——「播放本章」变成一个完整动作。
    */
-  const seekTo = useCallback((t: number, endT?: number | null) => {
-    if (!Number.isFinite(t)) return
-    setSeekRequest(makeSeekRequest(t, endT ?? null))
-  }, [])
+  const seekTo = useCallback(
+    (t: number, endT?: number | null) => {
+      if (!Number.isFinite(t)) return
+      setSeekRequest(makeSeekRequest(t, endT ?? null))
+      scrollChapterIntoView(t)
+    },
+    [scrollChapterIntoView],
+  )
 
   // ---------------------------------------------------------------- 导入
 
-  /** 当前分类作为「导入后归入哪里」的默认值：从某个分类里点导入，结果就该进那个分类 */
-  const targetFolderId = useMemo<number | null>(() => {
-    const n = Number(activeFolder)
-    return Number.isFinite(n) && String(n) === activeFolder ? n : null
-  }, [activeFolder])
+  /**
+   * 导入后的落点固定是「未分类」。
+   *
+   * 之前是「落到当前正在看的分类」，听起来贴心，实际有两个毛病：
+   *   1. 站在 A 分类里导入，东西直接沉进 A，用户根本没机会决定它该不该在这
+   *      ——分类的价值就在于**事后**整理，导入时替用户做决定等于取消了这一步；
+   *   2. 站在别处导入时，新视频出现在看不见的地方，像是没导进来。
+   * 统一先进未分类，再由用户拖走，路径才闭合。
+   */
+  const IMPORT_FOLDER_ID: number | null = null
 
   const formatFailures = (failed: { path: string; reason: string }[], limit = 3) => {
     const head = failed
@@ -193,9 +261,13 @@ export default function App() {
     setBusyHint(`正在导入 ${paths.length} 个文件…`)
     setError('')
     try {
-      const r = await api.importMany(paths, targetFolderId)
+      const r = await api.importMany(paths, IMPORT_FOLDER_ID)
       await refresh()
-      if (r.items.length && selectedId === null) setSelectedId(r.items[0].id)
+      // 落点是未分类，就把视图也切过去：否则新视频在看不见的地方，像是没导进来
+      if (r.items.length) {
+        setActiveFolder('none')
+        if (selectedId === null) setSelectedId(r.items[0].id)
+      }
       if (r.failed.length) setError(formatFailures(r.failed))
       else if (r.created === 0 && r.duplicates > 0) setError('这些视频之前已经导入过了')
     } catch (e) {
@@ -211,11 +283,14 @@ export default function App() {
     setBusyHint('正在扫描文件夹…')
     setError('')
     try {
-      const r = await api.importFolder(dir, { recursive: true, create_folder: true })
+      // create_folder=false：不再按目录名自动建分类。
+      // 整目录导入同样先进未分类，保持「导入一律先落地，整理交给人」这一条规则。
+      const r = await api.importFolder(dir, { recursive: true, create_folder: false })
       await refresh()
-      // 自动切到刚建好的分类：用户看到「东西已经归好位了」，而不是散在全量列表里
-      if (r.folder) setActiveFolder(String(r.folder.id))
-      if (r.imported_ids.length) setSelectedId(r.imported_ids[0])
+      if (r.imported_ids.length) {
+        setActiveFolder('none')
+        setSelectedId(r.imported_ids[0])
+      }
       if (r.failed.length) setError(formatFailures(r.failed))
       else if (r.created === 0 && r.duplicates > 0) setError('该目录下的视频都已导入过')
       else if (r.message) setError(r.message)
@@ -231,8 +306,9 @@ export default function App() {
     setBusy(true)
     setError('')
     try {
-      const r = await api.importVideo(path, targetFolderId)
+      const r = await api.importVideo(path, IMPORT_FOLDER_ID)
       await refresh()
+      setActiveFolder('none')
       setSelectedId(r.id)
     } catch (e) {
       setError(String((e as Error).message || e))
@@ -267,8 +343,9 @@ export default function App() {
     setError('')
     try {
       await api.deleteFolder(id)
-      // 正在看被删的分类时自动回到「全部」，否则界面会空得莫名其妙
-      if (activeFolder === String(id)) setActiveFolder('')
+      // 正在看被删的分类时自动回到「未分类」——删除会把视频退回未分类，
+      // 界面跟着切过去，用户才知道东西去哪了
+      if (activeFolder === String(id)) setActiveFolder('none')
       await refresh()
     } catch (e) {
       setError(String((e as Error).message || e))
@@ -340,6 +417,45 @@ export default function App() {
     }
   }
 
+  /**
+   * 按每一章自己的时间区间，用该区间的原文重写摘要与要点。
+   *
+   * 为什么要手动触发而不是每次自动：一次请求背后是「每章一次模型调用」，
+   * 16 章的课要打十几次，花钱又慢——适合「整理完时间轴之后按一下」，
+   * 不适合每次打开都跑。
+   */
+  const rewriteSummaries = async () => {
+    if (!detail) return
+    if (!detail.transcript) {
+      setError('这支视频还没有转写结果，无法按区间重写摘要')
+      return
+    }
+    const n = detail.chapters.length
+    if (
+      !confirm(
+        `用每章自己时间区间内的原文，重写全部 ${n} 条摘要与要点？\n\n` +
+          `会覆盖现在的内容，并消耗 ${n} 次左右的模型调用。`,
+      )
+    ) {
+      return
+    }
+    setRewriting(true)
+    setError('')
+    try {
+      const r = await api.rewriteChapterSummaries(detail.id)
+      await reloadDetail(detail.id)
+      if (r.errors.length) {
+        setError(`${r.errors.length} 条没写成：\n${r.errors.slice(0, 3).join('\n')}`)
+      } else if (r.skipped > 0) {
+        setError(`已重写 ${r.updated} 条；${r.skipped} 条区间内没有可用的原文，保持原样`)
+      }
+    } catch (e) {
+      setError(String((e as Error).message || e))
+    } finally {
+      setRewriting(false)
+    }
+  }
+
   const startAnalysis = async (videoId: number, force = false) => {
     setError('')
     try {
@@ -358,28 +474,29 @@ export default function App() {
     // vm-root：见 videomind.css，把原 body 的配色与字体收敛到这里，
     // 避免和 lingoSeek 路由的全局样式互相覆盖。
     <div className="vm-root h-full flex flex-col">
-      {/* 顶栏 */}
-      <header className="bg-white border-b border-gray-200 px-4 py-2.5 flex items-center shrink-0">
-        <div className="flex items-center gap-2">
+      {/* 顶栏：只放身份和两个次要入口，不该占掉画面高度。
+          py-1.5 + 24px 按钮 = 约 36px（原来 50px），省下来的全留给播放器 */}
+      <header className="bg-white border-b border-gray-200 px-4 py-1.5 flex items-center shrink-0">
+        <div className="flex items-center gap-1.5">
           <Link
             to="/"
-            className="text-[11px] text-gray-400 hover:text-blue-600 transition-colors"
+            className="inline-flex items-center min-h-[24px] px-1 -mx-1 rounded text-[10px] text-gray-400 hover:text-blue-600 hover:bg-gray-50 transition-colors"
             title="返回灵搜 LingoSeek 视频搜索"
           >
-            ← 灵搜
+            <span className="mr-0.5">←</span>灵搜
           </Link>
-          <span className="text-base font-semibold text-gray-900">video-mind</span>
-          <span className="text-[11px] text-gray-400">本地视频 · 章节 · 思维导图</span>
+          <span className="text-[13px] font-semibold text-gray-900 leading-none">video-mind</span>
+          <span className="text-[10px] text-gray-400 leading-none">本地视频 · 章节 · 思维导图</span>
         </div>
         <button
           onClick={() => setShowUsage(true)}
-          className="ml-auto text-xs px-3 py-1.5 rounded border border-gray-300 hover:bg-gray-50"
+          className={`ml-auto text-[11px] px-2.5 rounded border border-gray-300 hover:bg-gray-50 ${MIN_TAPPABLE}`}
         >
           用量
         </button>
         <button
           onClick={() => setShowSettings(true)}
-          className="ml-2 text-xs px-3 py-1.5 rounded border border-gray-300 hover:bg-gray-50"
+          className={`ml-1.5 text-[11px] px-2.5 rounded border border-gray-300 hover:bg-gray-50 ${MIN_TAPPABLE}`}
         >
           设置
         </button>
@@ -388,177 +505,291 @@ export default function App() {
       {error && (
         <div className="bg-red-50 border-b border-red-200 text-red-700 text-xs px-4 py-2 flex items-start gap-2">
           <span className="flex-1 whitespace-pre-wrap">{error}</span>
-          <button onClick={() => setError('')} className="text-red-400 hover:text-red-700">
-            ×
-          </button>
+          <IconButton
+            icon={<CloseIcon size={16} />}
+            label="关闭错误提示"
+            onClick={() => setError('')}
+            className="text-red-400 hover:text-red-700 hover:bg-red-100"
+          />
         </div>
       )}
 
       <div className="flex-1 flex min-h-0">
-        {/* 左：导入 + 分类 + 视频列表。宽度可拖，可一键折叠。 */}
+        {/*
+          左：视频库 / 章节 两个 tab。
+          章节从中间栏搬过来是有意为之：原来「上面视频 + 下面章节」的纵向布局，
+          视频按 16:9 一放，一屏只能看到一条章节，两边互相挤。
+          改成左右并排后——左栏翻章节、中栏看视频，播放和浏览同时进行。
+        */}
         {leftOpen ? (
           <>
             <aside
+              // 自动化钩子：右栏也是 <aside>，脚本里按 data-panel 才能只认左栏
+              data-panel="left"
               style={{ width: leftWidth }}
               className="bg-white border-r border-gray-200 flex flex-col shrink-0"
             >
-              <div className="px-3 py-1.5 border-b border-gray-100 flex items-center shrink-0">
-                <span className="text-[11px] text-gray-500">视频库</span>
-                <button
+              <div className="flex items-center border-b border-gray-200 shrink-0">
+                <div className="flex flex-1">
+                  {(
+                    [
+                      ['library', '视频库'],
+                      ['chapters', detail ? `章节（${detail.chapters.length}）` : '章节'],
+                    ] as const
+                  ).map(([key, label]) => (
+                    <button
+                      key={key}
+                      onClick={() => setLeftTab(key)}
+                      className={[
+                        'flex-1 px-3 py-2 text-xs font-medium transition',
+                        leftTab === key
+                          ? 'text-blue-600 border-b-2 border-blue-600'
+                          : 'text-gray-500 hover:text-gray-800',
+                      ].join(' ')}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <IconButton
+                  icon={<ChevronsLeftIcon size={15} />}
+                  label="折叠左侧栏"
                   onClick={() => setLeftOpen(false)}
-                  title="折叠左侧栏"
-                  className="ml-auto text-[10px] px-1.5 py-0.5 rounded border border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-700"
-                >
-                  «
-                </button>
+                  className="mr-1 border border-gray-200 hover:bg-gray-50 hover:text-gray-700"
+                />
               </div>
 
-              <ImportPanel
-                pickerAvailable={pickerInfo?.available ?? false}
-                pickerReason={pickerInfo?.reason ?? ''}
-                busy={busy}
-                busyHint={busyHint}
-                onPickFiles={doImportFiles}
-                onPickFolder={doImportFolder}
-                onPastePath={doImport}
-              />
+              {leftTab === 'library' ? (
+                <>
+                  <ImportPanel
+                    pickerAvailable={pickerInfo?.available ?? false}
+                    pickerReason={pickerInfo?.reason ?? ''}
+                    busy={busy}
+                    busyHint={busyHint}
+                    onPickFiles={doImportFiles}
+                    onPickFolder={doImportFolder}
+                    onPastePath={doImport}
+                    wide={leftWide}
+                  />
 
-              <FolderList
-                folders={folders}
-                videos={videos}
-                active={activeFolder}
-                selectedId={selectedId}
-                totalCount={videos.length}
-                unfiledCount={videos.filter((v) => v.folder_id === null).length}
-                onSelect={setActiveFolder}
-                onCreate={createFolder}
-                onRename={renameFolder}
-                onDelete={removeFolder}
-                onDropVideo={moveVideo}
-                onSelectVideo={setSelectedId}
-                onAnalyze={startAnalysis}
-                onMove={moveVideo}
-              />
+                  <FolderList
+                    wide={leftWide}
+                    folders={folders}
+                    videos={videos}
+                    active={activeFolder}
+                    selectedId={selectedId}
+                    unfiledCount={videos.filter((v) => v.folder_id === null).length}
+                    onSelect={setActiveFolder}
+                    onCreate={createFolder}
+                    onRename={renameFolder}
+                    onDelete={removeFolder}
+                    onDropVideo={moveVideo}
+                    onSelectVideo={setSelectedId}
+                    onAnalyze={startAnalysis}
+                  />
+                </>
+              ) : (
+                <div
+                  ref={chapterScrollRef}
+                  className="flex-1 min-h-0 overflow-y-auto thin-scroll p-2 space-y-2"
+                >
+                  {!detail ? (
+                    <div className="text-xs text-gray-400 text-center py-8">
+                      先在「视频库」里选一个视频
+                    </div>
+                  ) : (
+                    <>
+                      {/* 本次分析的模型用量：跟章节放一起，都是「这支视频」的产物 */}
+                      {detail.token_usage && detail.token_usage.calls > 0 && (
+                        <div className="bg-gray-50 border border-gray-200 rounded-lg px-2.5 py-1.5 text-[10px] text-gray-500 flex items-center gap-1.5 flex-wrap">
+                          <span className="tabular-nums">
+                            用量{' '}
+                            <b className="text-gray-900">
+                              {detail.token_usage.total_tokens.toLocaleString('zh-CN')}
+                            </b>{' '}
+                            tokens
+                          </span>
+                          <span className="tabular-nums">
+                            {detail.token_usage.calls} 次调用
+                          </span>
+                          <button
+                            onClick={() => setShowUsage(true)}
+                            className={`ml-auto text-blue-600 hover:underline hover:bg-blue-50 px-1 rounded ${MIN_TAPPABLE}`}
+                          >
+                            全部 →
+                          </button>
+                        </div>
+                      )}
+
+                      {detail.chapters.length > 0 && (
+                        // 摘要必须「按自己那段时间的原文」写。区间被导图同步改过之后，
+                        // 旧摘要就对不上了——给它一个一键重写的出口，而不是让用户
+                        // 一条条手动改。
+                        <div className="flex items-center gap-1.5 px-0.5">
+                          <span className="text-[10px] text-gray-400 leading-tight">
+                            摘要按各自时间区间生成
+                          </span>
+                          <button
+                            onClick={rewriteSummaries}
+                            disabled={rewriting}
+                            title={
+                              detail.transcript
+                                ? '用每章自己区间内的原文重新生成摘要与要点（会覆盖现有内容）'
+                                : '这支视频还没有转写结果'
+                            }
+                            className={`ml-auto shrink-0 text-[10px] px-1.5 rounded border border-gray-200 text-gray-500 hover:bg-white hover:border-gray-300 hover:text-gray-800 disabled:opacity-50 ${MIN_TAPPABLE}`}
+                          >
+                            {rewriting ? '重写中…' : '按区间重写摘要'}
+                          </button>
+                        </div>
+                      )}
+
+                      {detail.chapters.length > 0 ? (
+                        <ChapterList
+                          chapters={detail.chapters}
+                          currentTime={currentTime}
+                          // 章节卡里铺出「这一章包含的导图节点」（节点带摘要，
+                          // 但不再内嵌原文——逐字稿在右栏看）
+                          mindmap={detail.mindmap}
+                          onSeek={(t, end) => seekTo(t, end)}
+                          onAdd={addChapter}
+                          onPatch={patchChapter}
+                          onDelete={removeChapter}
+                        />
+                      ) : (
+                        <div className="text-xs text-gray-400 text-center py-6">
+                          {detail.status === 'ready' ? '暂无章节' : '分析完成后自动生成章节'}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
             </aside>
 
             <PanelResizer
-              label="调整视频库宽度"
+              label="调整左侧栏宽度"
               onDelta={(dx) => setLeftWidth((w) => clamp(w + dx, LEFT_MIN, LEFT_MAX))}
               onToggle={() => setLeftOpen(false)}
             />
           </>
         ) : (
-          <PanelRail side="left" label="视频库" onExpand={() => setLeftOpen(true)} />
+          <PanelRail
+            side="left"
+            // 折叠后按 tab 切段：点「视频库」开视频库，点「章节」开章节，
+            // 不用「先展开、再点一下标签」两步走
+            items={[
+              { key: 'library', label: '视频库' },
+              { key: 'chapters', label: '章节' },
+            ]}
+            active={leftTab}
+            onPick={(key) => {
+              if (key === 'library' || key === 'chapters') setLeftTab(key)
+              setLeftOpen(true)
+            }}
+          />
         )}
 
-        {/* 中：播放器 + 章节 */}
-        <main className="flex-1 overflow-y-auto thin-scroll p-4">
+        {/*
+          中：只剩播放器（+状态卡）。章节搬去了左栏 tab——
+          原来「上视频下章节」的纵向布局，两边抢同一块高度：
+          视频一大章节就只剩一条缝。并排之后互不打架，
+          播放器用整个中栏的高度内接 16:9，画面能给到最大。
+        */}
+        <main className="flex-1 min-w-0 flex flex-col min-h-0">
           {!detail ? (
             <EmptyState />
           ) : (
-            <div className="space-y-4">
-              <VideoPlayer
+            <>
+              <PlayerPane
                 video={detail}
                 playerRef={playerRef}
                 seekRequest={seekRequest}
                 onTimeUpdate={setCurrentTime}
               />
 
-              {/* 进度条区 */}
-              {detail.status === 'processing' && (
-                <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3">
-                  <div className="flex items-center justify-between text-xs text-blue-900 mb-2">
-                    <span className="font-medium">
-                      {STAGE_LABELS[job?.stage ?? ''] ?? '处理中…'}
-                    </span>
-                    <span className="tabular-nums">每 2 秒自动刷新</span>
-                  </div>
-                  {job?.message && (
-                    <p className="text-[11px] text-blue-700 mb-2">{job.message}</p>
+              {/* 状态卡：独立于播放器高度，不再把画面挤到只剩一条缝 */}
+              {(detail.status === 'processing' ||
+                detail.status === 'failed' ||
+                detail.status === 'pending') && (
+                <div className="shrink-0 space-y-1.5 px-3 pb-2">
+                  {detail.status === 'processing' && (
+                    <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] font-medium text-blue-900">
+                          {STAGE_LABELS[job?.stage ?? ''] ?? '处理中…'}
+                        </span>
+                        {job?.message && (
+                          <span className="min-w-0 flex-1 truncate text-[11px] text-blue-700">
+                            {job.message}
+                          </span>
+                        )}
+                        <span className="ml-auto shrink-0 text-[10px] text-blue-600">
+                          每 2 秒自动刷新 · 可切到别的视频，后台继续
+                        </span>
+                      </div>
+                      <div className="mt-1.5 h-1 bg-blue-100 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-blue-500 rounded-full transition-all duration-500"
+                          style={{ width: '100%' }}
+                        />
+                      </div>
+                    </div>
                   )}
-                  <div className="h-1.5 bg-blue-100 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-blue-500 rounded-full transition-all duration-500"
-                      style={{ width: '100%' }}
-                    />
-                  </div>
-                  <p className="text-[10px] text-blue-600 mt-2 leading-relaxed">
-                    长视频转写较慢（1 小时视频 GPU 上约需 5-15 分钟），
-                    可以切到别的视频，处理在后台继续。
-                  </p>
+
+                  {/*
+                    失败提示必须能收起。
+                    错误原文一长就会把播放区底部整块顶掉——
+                    看着像「播放器没了」，其实是红框把高度吃光了。
+                    所以给两个出口：× 收成一行，收起后还能点「详情」再看。
+                  */}
+                  {detail.status === 'failed' && (
+                    <div className="bg-red-50 border border-red-200 rounded-lg px-3 py-1.5">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-medium text-red-800">处理失败</span>
+                        <button
+                          onClick={() => startAnalysis(detail.id, true)}
+                          className={`text-[11px] px-2 rounded border border-red-300 text-red-700 hover:bg-red-100 ${MIN_TAPPABLE}`}
+                        >
+                          重试
+                        </button>
+                        {!failExpanded && detail.error && (
+                          <button
+                            onClick={() => setFailExpanded(true)}
+                            className="text-[11px] text-red-600 hover:underline"
+                          >
+                            详情
+                          </button>
+                        )}
+                        <IconButton
+                          icon={<CloseIcon size={15} />}
+                          label="收起错误详情"
+                          onClick={() => setFailExpanded(false)}
+                          className="ml-auto text-red-400 hover:text-red-700 hover:bg-red-100"
+                        />
+                      </div>
+                      {failExpanded && detail.error && (
+                        <p className="text-[11px] text-red-700 whitespace-pre-wrap mt-1.5 max-h-28 overflow-y-auto thin-scroll">
+                          {detail.error}
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {detail.status === 'pending' && (
+                    <div className="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-1.5">
+                      <span className="text-[11px] text-gray-600">尚未分析</span>
+                      <button
+                        onClick={() => startAnalysis(detail.id)}
+                        className={`rounded bg-blue-600 px-3 text-[11px] text-white hover:bg-blue-500 ${MIN_TAPPABLE}`}
+                      >
+                        开始分析
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
-
-              {detail.status === 'failed' && (
-                <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3">
-                  <div className="text-xs font-medium text-red-800 mb-1">处理失败</div>
-                  <p className="text-[11px] text-red-700 whitespace-pre-wrap">{detail.error}</p>
-                  <button
-                    onClick={() => startAnalysis(detail.id, true)}
-                    className="mt-2 text-[11px] px-2.5 py-1 rounded border border-red-300 text-red-700 hover:bg-red-100"
-                  >
-                    重试
-                  </button>
-                </div>
-              )}
-
-              {detail.status === 'pending' && (
-                <div className="bg-gray-50 border border-gray-200 rounded-lg px-4 py-6 text-center">
-                  <p className="text-sm text-gray-600 mb-3">尚未分析</p>
-                  <button
-                    onClick={() => startAnalysis(detail.id)}
-                    className="px-4 py-2 rounded bg-blue-600 text-white text-xs hover:bg-blue-500"
-                  >
-                    开始分析
-                  </button>
-                </div>
-              )}
-
-              {/* 本次分析的模型用量：分析的直接成本，必须让用户随手可见，
-                  而不是藏在设置页里。点「用量」看全局明细。 */}
-              {detail.token_usage && detail.token_usage.calls > 0 && (
-                <div className="bg-gray-50 border border-gray-200 rounded-lg px-3.5 py-2.5 flex items-center flex-wrap gap-x-4 gap-y-1">
-                  <span className="text-[11px] text-gray-500">模型用量</span>
-                  <span className="text-[11px] text-gray-700 tabular-nums">
-                    合计{' '}
-                    <b className="text-gray-900">{detail.token_usage.total_tokens.toLocaleString('zh-CN')}</b>{' '}
-                    tokens
-                  </span>
-                  <span className="text-[11px] text-gray-500 tabular-nums">
-                    输入 {detail.token_usage.prompt_tokens.toLocaleString('zh-CN')} · 输出{' '}
-                    {detail.token_usage.completion_tokens.toLocaleString('zh-CN')}
-                  </span>
-                  <span className="text-[11px] text-gray-500 tabular-nums">
-                    {detail.token_usage.calls} 次调用
-                  </span>
-                  <button
-                    onClick={() => setShowUsage(true)}
-                    className="ml-auto text-[11px] text-blue-600 hover:underline"
-                  >
-                    查看全部用量 →
-                  </button>
-                </div>
-              )}
-
-              {detail.chapters.length > 0 && (
-                <section>
-                  <h2 className="text-sm font-semibold text-gray-900 mb-2 flex items-center gap-2">
-                    章节
-                    <span className="text-[11px] font-normal text-gray-400">
-                      点击任意章节跳转到对应时间
-                    </span>
-                  </h2>
-                  <ChapterList
-                    chapters={detail.chapters}
-                    currentTime={currentTime}
-                    onSeek={(t, end) => seekTo(t, end)}
-                    onAdd={addChapter}
-                    onPatch={patchChapter}
-                    onDelete={removeChapter}
-                  />
-                </section>
-              )}
-            </div>
+            </>
           )}
         </main>
 
@@ -572,6 +803,7 @@ export default function App() {
               onToggle={() => setRightOpen(false)}
             />
             <aside
+              data-panel="right"
               style={{ width: rightWidth }}
               className="bg-white border-l border-gray-200 flex flex-col shrink-0"
             >
@@ -599,13 +831,16 @@ export default function App() {
                         {label}
                       </button>
                     ))}
-                    <button
+                    {/* 和标签页同高（24px+），之前是 20×28 的字符 « »，
+                        比两边的「思维导图 / 逐字稿」矮一截，看着不齐 */}
+                    <IconButton
+                      icon={<ChevronsRightIcon size={15} />}
+                      label="折叠右侧栏"
                       onClick={() => setRightOpen(false)}
-                      title="折叠右侧栏"
-                      className="px-2 text-[11px] text-gray-400 hover:text-gray-700 hover:bg-gray-50"
-                    >
-                      »
-                    </button>
+                      // 标签页是 32px 高（py-2），折叠按钮跟着那一行撑满，
+                      // 否则它矮 8px，右边像缺了一块
+                      className="!h-auto px-1.5 rounded-none hover:bg-gray-50 hover:text-gray-700"
+                    />
                   </div>
 
                   {/*
@@ -630,13 +865,12 @@ export default function App() {
                         </span>
                       )}
                       <span className="flex-1" />
-                      <button
+                      <IconButton
+                        icon={<CloseIcon size={14} />}
+                        label="关闭提示"
                         onClick={() => setFinishNotice(null)}
-                        className="shrink-0 px-1 text-gray-400 hover:text-gray-800"
-                        title="关闭提示"
-                      >
-                        ×
-                      </button>
+                        className="hover:text-gray-800 hover:bg-black/5"
+                      />
                     </div>
                   )}
 
@@ -726,7 +960,19 @@ export default function App() {
             </aside>
           </>
         ) : (
-          <PanelRail side="right" label="思维导图" onExpand={() => setRightOpen(true)} />
+          <PanelRail
+            side="right"
+            // 右栏同理：折叠着也能直接开「思维导图」或「逐字稿」
+            items={[
+              { key: 'mindmap', label: '思维导图' },
+              { key: 'transcript', label: '逐字稿' },
+            ]}
+            active={rightTab}
+            onPick={(key) => {
+              if (key === 'mindmap' || key === 'transcript') setRightTab(key)
+              setRightOpen(true)
+            }}
+          />
         )}
       </div>
 
@@ -746,7 +992,20 @@ const LEFT_MAX = 560
 const RIGHT_MIN = 300
 // 右栏默认 460：导图改成中心发散后，左右两个方向都要横向空间，
 // 420 会把两侧分支压得只剩标签头几个字。
-const DEFAULT_LAYOUT = { leftWidth: 256, rightWidth: 460, leftOpen: true, rightOpen: true }
+const DEFAULT_LAYOUT = {
+  leftWidth: 256,
+  rightWidth: 460,
+  leftOpen: true,
+  rightOpen: true,
+}
+
+/**
+ * 播放器那一块的上下内边距（pt-3 + pb-2 = 12 + 8）。
+ *
+ * 播放器窗口要在「可用宽 × 可用高」里内接 16:9，而量到的高度是整块的高度，
+ * 内边距得在这里减掉。两处必须同步改，改了 padding 不改这里，窗口又会超出一截。
+ */
+const PLAYER_CHROME = 20
 
 type LayoutState = typeof DEFAULT_LAYOUT
 
@@ -802,11 +1061,69 @@ const STAGE_LABELS: Record<string, string> = {
   failed: '失败',
 }
 
+/**
+ * 播放区：整个中栏只留播放器。
+ *
+ * 高度上限在这层组件里量，而不是在 App 里量——包一层组件才能在挂载时拿到
+ * ref，App 里那个 ref 在还没选中视频时是空的，effect 那时早就跑完了。
+ * 量的是**外框**：外框是 flex-1，高度由父容器定、不随播放器变，
+ * 所以不存在「量高度 → 改高度 → 再量」的死循环。
+ *
+ * 少了这一步真的会出事：把两侧面板折叠掉之后中栏会非常宽，
+ * 按满宽算 16:9 得到的高度直接顶出屏幕，画面下半截被裁掉。
+ * 而又不能让播放器自己去读容器高度（那才是真的成环），只能由外面喂进去。
+ */
+function PlayerPane({
+  video,
+  playerRef,
+  seekRequest,
+  onTimeUpdate,
+}: {
+  video: VideoDetail
+  playerRef: React.RefObject<HTMLVideoElement>
+  seekRequest: SeekRequest | null
+  onTimeUpdate: (t: number) => void
+}) {
+  const boxRef = useRef<HTMLDivElement>(null)
+  const [boxH, setBoxH] = useState(0)
+  useEffect(() => {
+    const el = boxRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      const h = el.getBoundingClientRect().height
+      setBoxH((prev) => (Math.abs(prev - h) < 1 ? prev : h))
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  return (
+    <div
+      ref={boxRef}
+      data-player-block="1"
+      className="flex min-h-0 flex-1 overflow-hidden px-3 pt-3 pb-2"
+    >
+      <VideoPlayer
+        video={video}
+        playerRef={playerRef}
+        seekRequest={seekRequest}
+        fitHeight={boxH > 0 ? boxH - PLAYER_CHROME : null}
+        onTimeUpdate={onTimeUpdate}
+      />
+    </div>
+  )
+}
+
 function EmptyState() {
   return (
     <div className="h-full flex items-center justify-center">
       <div className="text-center max-w-md px-6">
-        <div className="text-5xl mb-4">🎬</div>
+        {/* 原先是一个 🎬 emoji：不同系统上渲染成完全不同的图形，
+            有的还带颜色，和整站的灰蓝色调打架 */}
+        <div className="mb-4 flex justify-center">
+          <span className="inline-flex h-12 w-12 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
+            <VideoIcon size={26} />
+          </span>
+        </div>
         <h2 className="text-lg font-semibold text-gray-800 mb-2">把长视频变成可导航的知识地图</h2>
         <p className="text-sm text-gray-500 leading-relaxed mb-4">
           导入本地视频后，自动完成语音转写、智能分章节与思维导图生成。
@@ -814,7 +1131,7 @@ function EmptyState() {
         </p>
         <ol className="text-xs text-gray-400 text-left space-y-1.5 bg-gray-50 rounded-lg p-4">
           <li>① 点左侧「选择视频文件导入」，或「选择文件夹批量导入」</li>
-          <li>② 导入后可拖到左侧任意分类里，或「＋ 新建」一个分类</li>
+          <li>② 导入后可拖到左侧任意分类里，或「新建」一个分类</li>
           <li>③ 进入「设置」配置大模型 API Key（推荐 DeepSeek）</li>
           <li>④ 点击「开始分析」，等待转写与章节生成</li>
           <li>⑤ 在右侧思维导图上点击节点即可跳转播放</li>

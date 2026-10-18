@@ -1,15 +1,28 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { Folder, VideoSummary } from '../types'
 import VideoRow from './VideoRow'
+import {
+  ChevronDownIcon,
+  ChevronRightIcon,
+  CheckIcon,
+  CloseIcon,
+  FolderIcon,
+  FolderOpenIcon,
+  IconButton,
+  InboxIcon,
+  MIN_TAPPABLE,
+  PencilIcon,
+  PlusIcon,
+  TrashIcon,
+} from './icons'
 
 interface Props {
   folders: Folder[]
   /** 全量视频：按 folder_id 分组后就地挂在对应分类节点下 */
   videos: VideoSummary[]
-  /** 当前选中的分类：'' 全部 | 'none' 未分类 | '<id>' 某个分类 */
+  /** 当前选中的分类：'none' 未分类 | '<id>' 某个分类 */
   active: string
   selectedId: number | null
-  totalCount: number
   unfiledCount: number
   onSelect: (key: string) => void
   /** parentId=null 建在根级，否则建在该分类下 */
@@ -20,7 +33,8 @@ interface Props {
   onDropVideo: (videoId: number, folderId: number | null) => void
   onSelectVideo: (id: number) => void
   onAnalyze: (id: number, force: boolean) => void
-  onMove: (videoId: number, folderId: number | null) => void
+  /** 左栏被拉宽时行也跟着放开，否则中间会撑出一大片空白（见 VideoRow 的说明） */
+  wide?: boolean
 }
 
 /**
@@ -30,15 +44,16 @@ interface Props {
  *  1. 必须能**就地新建**——用户是看到一堆杂乱视频之后才意识到要分类的，
  *     让他先去别的地方建分类再回来拖，等于没做。分类本身可以嵌套，
  *     所以每个分类行上还挂了一个「在此建子分类」的入口。
- *  2. 必须支持**拖拽**——「把这条丢进那个分类」是肌肉记忆级的操作，
- *     下拉框只是给键盘用户的等价入口。
+ *  2. 必须支持**拖拽**——「把这条丢进那个分类」是肌肉记忆级的操作。
+ *     视频行上原来还挂了个「移动到分类」下拉框当键盘入口，
+ *     2026-10-18 为了把每条视频压成一行删掉了（拖拽是主路径，
+ *     下拉让每条视频白付一行高度）。要移动，拖就行。
  */
 export default function FolderList({
   folders,
   videos,
   active,
   selectedId,
-  totalCount,
   unfiledCount,
   onSelect,
   onCreate,
@@ -47,24 +62,22 @@ export default function FolderList({
   onDropVideo,
   onSelectVideo,
   onAnalyze,
-  onMove,
+  wide = false,
 }: Props) {
   const [draft, setDraft] = useState('')
   const [renamingId, setRenamingId] = useState<number | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [dragOver, setDragOver] = useState<string | null>(null)
-  /** 展开的分类 key 集合；默认展开「全部视频」，打开就有东西看 */
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(['']))
+  /** 展开的分类 key 集合；默认展开「未分类」——它是所有新导入视频的落点，打开就有东西看 */
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(['none']))
   /** undefined=没在新建；null=建在根级；number=建在该分类下 */
   const [newParentId, setNewParentId] = useState<number | null | undefined>(undefined)
-
-  const folderPaths = useMemo(() => buildPaths(folders), [folders])
 
   const childrenOf = (parentId: number | null) =>
     folders.filter((f) => (f.parent_id ?? null) === parentId)
 
+  /** key 只有两种取值：'none'=未分类，'<id>'=某个分类。没有「全部」这一档了 */
   const videosOf = (key: string): VideoSummary[] => {
-    if (key === '') return videos
     if (key === 'none') return videos.filter((v) => v.folder_id === null)
     return videos.filter((v) => v.folder_id === Number(key))
   }
@@ -104,11 +117,7 @@ export default function FolderList({
   useEffect(() => {
     setExpanded((prev) => {
       if (prev.has(active)) return prev
-      const next = new Set(prev)
-      if (active === '') next.clear()
-      else next.delete('')
-      next.add(active)
-      return next
+      return new Set(prev).add(active)
     })
   }, [active])
 
@@ -116,14 +125,8 @@ export default function FolderList({
   const toggle = (key: string) => {
     setExpanded((prev) => {
       const next = new Set(prev)
-      if (next.has(key)) {
-        next.delete(key)
-        return next
-      }
-      // 「全部视频」与具体分类互斥：否则同一个视频会同时出现在两处，看着像重复
-      if (key === '') next.clear()
-      else next.delete('')
-      next.add(key)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
       return next
     })
     onSelect(key)
@@ -149,7 +152,7 @@ export default function FolderList({
       <button
         onClick={() => submitNew(parentId)}
         disabled={!draft.trim()}
-        className="text-[10px] px-2 rounded bg-blue-600 text-white disabled:opacity-40"
+        className={`text-[10px] px-2 rounded bg-blue-600 text-white disabled:opacity-40 ${MIN_TAPPABLE}`}
       >
         建
       </button>
@@ -170,11 +173,9 @@ export default function FolderList({
               key={v.id}
               video={v}
               selected={selectedId === v.id}
-              folders={folders}
-              folderPaths={folderPaths}
               onSelect={onSelectVideo}
               onAnalyze={onAnalyze}
-              onMove={onMove}
+              wide={wide}
             />
           ))
         )}
@@ -220,12 +221,14 @@ export default function FolderList({
             maxLength={32}
             className="flex-1 min-w-0 text-[11px] border border-gray-300 rounded px-1.5 py-1 focus:outline-none focus:border-blue-400"
           />
-          <button
+          {/* 确认按钮也曾是个 20px 的「✓」字符；换成 24×24 的图标按钮后
+              和左边的输入框一样高，不会显得短一截 */}
+          <IconButton
+            icon={<CheckIcon size={15} />}
+            label="确认重命名"
             onClick={() => submitRename(f.id)}
-            className="text-[10px] px-1.5 rounded border border-gray-300 hover:bg-gray-50"
-          >
-            ✓
-          </button>
+            className="border border-gray-300 hover:bg-gray-50 hover:text-gray-900"
+          />
         </div>
       )
     }
@@ -233,9 +236,10 @@ export default function FolderList({
     return (
       <div key={f.id}>
         <Row
+          wide={wide}
           label={f.name}
           count={f.video_count}
-          icon={open ? '📂' : '📁'}
+          icon={open ? <FolderOpenIcon size={14} /> : <FolderIcon size={14} />}
           active={active === key}
           expanded={open}
           onClick={() => toggle(key)}
@@ -265,11 +269,9 @@ export default function FolderList({
                 key={v.id}
                 video={v}
                 selected={selectedId === v.id}
-                folders={folders}
-                folderPaths={folderPaths}
                 onSelect={onSelectVideo}
                 onAnalyze={onAnalyze}
-                onMove={onMove}
+                wide={wide}
               />
             ))}
             {kids.map((k) => renderFolder(k))}
@@ -286,31 +288,35 @@ export default function FolderList({
     <div className="flex-1 min-h-0 overflow-y-auto thin-scroll px-2 py-2 border-b border-gray-100">
       <div className="flex items-center justify-between px-1 mb-1">
         <span className="text-[10px] text-gray-400">分类</span>
+        {/* 「＋ 新建」原来是纯文字，10px 字高 15px、没有内边距，
+            点中的面积只有一行字的宽度 × 15px。现在图标 + 文字共用一个
+            24px 高的按钮，点哪都算。 */}
         <button
           onClick={() => setNewParentId((v) => (v === undefined ? null : undefined))}
-          title="新建根级分类"
-          className="text-[10px] text-gray-400 hover:text-blue-600"
+          title={newParentId !== undefined ? '取消新建' : '新建根级分类'}
+          className={`gap-1 px-1.5 rounded text-[11px] text-gray-400 hover:text-blue-600 hover:bg-blue-50 ${MIN_TAPPABLE}`}
         >
-          {newParentId !== undefined ? '取消' : '＋ 新建'}
+          {newParentId !== undefined ? (
+            <>
+              <CloseIcon size={13} />
+              取消
+            </>
+          ) : (
+            <>
+              <PlusIcon size={13} />
+              新建
+            </>
+          )}
         </button>
       </div>
 
       {newParentId === null && newInput(null)}
 
       <Row
-        label="全部视频"
-        count={totalCount}
-        icon="🗂"
-        active={active === ''}
-        expanded={expanded.has('')}
-        onClick={() => toggle('')}
-      />
-      {children('')}
-
-      <Row
+        wide={wide}
         label="未分类"
         count={unfiledCount}
-        icon="📥"
+        icon={<InboxIcon size={14} />}
         active={active === 'none'}
         expanded={expanded.has('none')}
         onClick={() => toggle('none')}
@@ -324,25 +330,13 @@ export default function FolderList({
   )
 }
 
-/** 「课程/进阶」这样的完整路径：多级下同名分类靠它区分 */
-function buildPaths(folders: Folder[]): Record<number, string> {
-  const byId = new Map(folders.map((f) => [f.id, f]))
-  const walk = (f: Folder, depth = 0): string => {
-    if (depth > 12) return f.name // 数据异常时兜底，不把界面卡死
-    const parent = f.parent_id != null ? byId.get(f.parent_id) : undefined
-    return parent ? `${walk(parent, depth + 1)}/${f.name}` : f.name
-  }
-  const out: Record<number, string> = {}
-  for (const f of folders) out[f.id] = walk(f)
-  return out
-}
-
 function Row({
   label,
   count,
   icon,
   active,
   expanded,
+  wide = false,
   dropHighlight,
   onClick,
   onAddChild,
@@ -352,11 +346,13 @@ function Row({
 }: {
   label: string
   count: number
-  icon: string
+  icon: React.ReactNode
   active: boolean
   /** 是否展开：决定前面那个三角的朝向 */
   expanded: boolean
   dropHighlight?: boolean
+  /** 宽面板下把行放开一点（更高的行、稍大的字），窄面板保持密集 */
+  wide?: boolean
   onClick: () => void
   onAddChild?: () => void
   onRename?: () => void
@@ -366,54 +362,60 @@ function Row({
     <div
       onClick={onClick}
       title={label}
+      // data-* 给冒烟脚本用：折叠态以前靠行里有没有「▸」字符判断，
+      // 三角换成 SVG 之后文本里就没这个字了，改用显式状态属性
+      data-folder-row="1"
+      data-expanded={expanded ? 'true' : 'false'}
       className={[
-        'group flex items-center gap-1 px-2 py-1.5 rounded cursor-pointer text-[11px] transition',
+        'group flex items-center gap-1 px-2 rounded cursor-pointer transition',
+        wide ? 'py-1 text-[12px]' : 'py-0.5 text-[11px]',
         active ? 'bg-blue-50 text-blue-700' : 'text-gray-700 hover:bg-gray-50',
         dropHighlight ? 'ring-2 ring-blue-400 bg-blue-50' : '',
       ].join(' ')}
       {...rest}
     >
-      <span className="shrink-0 w-2.5 text-[9px] text-gray-400">{expanded ? '▾' : '▸'}</span>
-      <span className="shrink-0">{icon}</span>
+      {/* 三角是装饰：整行本身就是展开/折叠的热区，它只负责指示方向。
+          固定 14px 宽、垂直居中，保证所有行的文字左边缘对齐成一条线。 */}
+      <span className="shrink-0 flex items-center justify-center text-gray-400" style={{ width: 14 }}>
+        {expanded ? <ChevronDownIcon size={12} /> : <ChevronRightIcon size={12} />}
+      </span>
+      <span className="shrink-0 flex items-center">{icon}</span>
       <span className="flex-1 min-w-0 truncate">{label}</span>
       <span className="text-[10px] text-gray-400 tabular-nums shrink-0">{count}</span>
       {(onAddChild || onRename || onDelete) && (
-        <span className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100">
+        <span className="flex items-center shrink-0 opacity-0 group-hover:opacity-100">
           {onAddChild && (
-            <button
+            <IconButton
+              icon={<PlusIcon size={14} />}
+              label="在此分类下新建子分类"
               onClick={(e) => {
                 e.stopPropagation()
                 onAddChild()
               }}
-              title="在此分类下新建子分类"
-              className="text-[10px] text-gray-400 hover:text-blue-600 px-0.5"
-            >
-              ＋
-            </button>
+              className="hover:text-blue-600 hover:bg-blue-50"
+            />
           )}
           {onRename && (
-            <button
+            <IconButton
+              icon={<PencilIcon size={14} />}
+              label="重命名"
               onClick={(e) => {
                 e.stopPropagation()
                 onRename()
               }}
-              title="重命名"
-              className="text-[10px] text-gray-400 hover:text-blue-600 px-0.5"
-            >
-              ✎
-            </button>
+              className="hover:text-blue-600 hover:bg-blue-50"
+            />
           )}
           {onDelete && (
-            <button
+            <IconButton
+              icon={<TrashIcon size={14} />}
+              label="删除分类"
+              tone="danger"
               onClick={(e) => {
                 e.stopPropagation()
                 onDelete()
               }}
-              title="删除分类"
-              className="text-[10px] text-gray-400 hover:text-red-600 px-0.5"
-            >
-              ✕
-            </button>
+            />
           )}
         </span>
       )}

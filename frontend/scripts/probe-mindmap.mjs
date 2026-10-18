@@ -84,9 +84,63 @@ async function waitSeekCount(n, timeout = 2000) {
  * 刷新会丢掉 React 里的 selectedId，页面回到列表——所以每次 reload 之后
  * 都要靠这个函数把同一支视频重新打开（按标题认人）。
  */
+/**
+ * 展开全部分类。默认只展开「未分类」，视频可能整批藏在折叠的分类里，
+ * 不先展开就只能在 rows[0]（「未分类」这一行本身）上兜底，等于没选中视频。
+ */
+async function expandFolders() {
+  for (let pass = 0; pass < 6; pass += 1) {
+    await page.evaluate(() => {
+      for (const r of document.querySelectorAll('[data-panel="left"] [data-folder-row][data-expanded="false"]')) {
+        r.click()
+      }
+    })
+    await page.waitForTimeout(200)
+  }
+}
+
+/**
+ * 找一块真正的画布空白。
+ * 必须在每次拖拽前**重新**找：中途平移过画布之后，
+ * 上一次记下的坐标很可能已经压在某个节点上——那就变成拖节点而不是框选了。
+ */
+async function findEmpty() {
+  const pane = await page.locator('.react-flow__pane').boundingBox()
+  return page.evaluate(
+    (r) => {
+      for (const dx of [6, 20, 40, 60, 90]) {
+        for (const dy of [6, 20, 40, 60, 90]) {
+          const el = document.elementFromPoint(r.x + dx, r.y + dy)
+          if (el && el.classList.contains('react-flow__pane')) return { x: r.x + dx, y: r.y + dy }
+        }
+      }
+      return null
+    },
+    pane,
+  )
+}
+
+/**
+ * 把「左键拖画布的含义」切到目标模式。
+ *
+ * 工具条压成一行后这是个来回切换的单按钮，显示的是**当前**模式：
+ * 想要平移就得在看到「框选」时点它。直接按名字找目标按钮会扑空。
+ */
+async function ensureTool(target) {
+  // target=pan 时，界面上显示「框选」说明当前是框选，点它切过去；
+  // 显示「平移」说明已经是平移，不用动
+  const other = target === 'pan' ? '框选' : '平移'
+  const btn = page.getByRole('button', { name: other, exact: true })
+  if ((await btn.count()) > 0) {
+    await btn.first().click()
+    await page.waitForTimeout(200)
+  }
+}
+
 async function openVideo(title) {
+  await expandFolders()
   await page.evaluate((t) => {
-    const rows = [...document.querySelectorAll('aside div.cursor-pointer')]
+    const rows = [...document.querySelectorAll('[data-panel="left"] div.cursor-pointer')]
     const row =
       rows.find((r) => (r.querySelector('.truncate')?.textContent ?? '').includes(t)) ??
       rows.find((r) => r.textContent.includes('已完成')) ??
@@ -101,8 +155,9 @@ await page.goto('http://127.0.0.1:5173/videomind/', { waitUntil: 'networkidle' }
 
 // 自己点开一支视频：合并后的应用没有按 URL 选视频的路由，
 // 左侧列表第一行点下去才会加载详情、渲染导图。优先挑「已完成」的。
+await expandFolders()
 const opened = await page.evaluate(() => {
-  const rows = [...document.querySelectorAll('aside div.cursor-pointer')]
+  const rows = [...document.querySelectorAll('[data-panel="left"] div.cursor-pointer')]
   const row = rows.find((r) => r.textContent.includes('已完成')) ?? rows[0]
   if (!row) return null
   const title = row.querySelector('.truncate')?.textContent ?? ''
@@ -166,12 +221,24 @@ check(
 // ---------------------------------------------------------------- 点击跳转
 const target = await page.evaluate(() => {
   const nodes = [...document.querySelectorAll('.react-flow__node')]
-  // 找一个肯定带时间戳的节点（内部有 tabular-nums 的时间徽章且不是「设时间」）
+  // 找一个肯定带时间戳的节点：认准时间徽章的 data-role。
+  // 早前用 button.tabular-nums 找，会误命中分类节点上的「折叠圆点」——
+  // 那个按钮同样带 tabular-nums，文本是「−」，于是「带时间戳的节点」
+  // 实际选中了一个分类节点，后面的断言全靠这个巧合成立。
   for (const el of nodes) {
-    const badge = el.querySelector('button.tabular-nums')
+    const badge = el.querySelector('button[data-role="time-badge"]')
     if (badge && !badge.textContent.includes('设时间')) {
       return { id: el.getAttribute('data-id'), text: badge.textContent }
     }
+  }
+  return null
+})
+
+/** 找一个「有子节点」的节点（靠折叠圆点认人）——折叠类操作只对它有意义 */
+const parentNode = await page.evaluate(() => {
+  for (const el of document.querySelectorAll('.react-flow__node')) {
+    const dot = el.querySelector('button[title*="折叠该分支"]')
+    if (dot) return { id: el.getAttribute('data-id') }
   }
   return null
 })
@@ -241,13 +308,28 @@ if (target) {
     .isDisabled()
   check('只读模式下右键菜单的「重命名」被禁用', renameDisabled)
   check('只读模式下右键菜单的「删除节点」被禁用', delDisabled)
-  // 折叠这类浏览操作不应被锁
-  const foldDisabled = await page
-    .locator('div.fixed.z-50 button')
-    .filter({ hasText: /折叠分支/ })
-    .first()
-    .isDisabled()
-  check('只读模式下「折叠分支」仍可用（它不改内容）', !foldDisabled)
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(200)
+
+  // 折叠这类浏览操作不应被锁。
+  // 必须在一个**有子节点**的节点上验证——「折叠分支」对叶子本来就是禁用的。
+  if (parentNode) {
+    const pbox = await page.locator(`.react-flow__node[data-id="${parentNode.id}"]`).boundingBox()
+    await page.mouse.click(pbox.x + pbox.width / 2, pbox.y + pbox.height / 2, { button: 'right' })
+    await page.waitForTimeout(300)
+    const foldDisabled = await page
+      .locator('div.fixed.z-50 button')
+      .filter({ hasText: /折叠分支/ })
+      .first()
+      .isDisabled()
+    check(
+      `只读模式下「折叠分支」仍可用（它不改内容）`,
+      !foldDisabled,
+      `在 ${parentNode.id} 上验证`,
+    )
+  } else {
+    check('只读模式下「折叠分支」仍可用（它不改内容）', false, '没找到带子节点的节点')
+  }
   await page.keyboard.press('Escape')
   await page.waitForTimeout(200)
 }
@@ -316,6 +398,41 @@ const empty = await page.evaluate(
 if (!empty) {
   check('找到画布空白处用于起手框选', false)
 } else {
+  // ---- 先验证「默认工具」：用户 2026-10-18 要求左键拖默认是平移 ----
+  const toolLabel = () =>
+    page.evaluate(() => {
+      const b = [...document.querySelectorAll('button')].find((x) =>
+        ['框选', '平移'].includes((x.textContent || '').trim()),
+      )
+      return b ? (b.textContent || '').trim() : ''
+    })
+  check('默认「左键拖」是平移', (await toolLabel()) === '平移', await toolLabel())
+  const vpTool0 = await page.evaluate(
+    () => document.querySelector('.react-flow__viewport').style.transform,
+  )
+  await page.mouse.move(empty.x, empty.y)
+  await page.mouse.down()
+  await page.mouse.move(empty.x + 60, empty.y + 40, { steps: 6 })
+  const rectWhilePan = await page.evaluate(
+    () => document.querySelectorAll('.react-flow__selection').length,
+  )
+  await page.mouse.up()
+  await page.waitForTimeout(300)
+  const vpTool1 = await page.evaluate(
+    () => document.querySelector('.react-flow__viewport').style.transform,
+  )
+  check('默认拖空白是平移画布（视角真的动了）', vpTool0 !== vpTool1, `${vpTool0} -> ${vpTool1}`)
+  check('默认拖空白不会拉出选框', rectWhilePan === 0, String(rectWhilePan))
+
+  // 把视角平回去，否则下面那次框选是从一张挪过的图上拉框，能框住几个节点就随机了
+  await page.mouse.move(empty.x + 60, empty.y + 40)
+  await page.mouse.down()
+  await page.mouse.move(empty.x, empty.y, { steps: 6 })
+  await page.mouse.up()
+  await page.waitForTimeout(300)
+
+  // 想框选：点工具条那个切换按钮切过去（它显示的是当前模式）
+  await ensureTool('select')
   await page.mouse.move(empty.x, empty.y)
   await page.mouse.down()
   await page.mouse.move(empty.x + 320, empty.y + 300, { steps: 10 })
@@ -377,13 +494,27 @@ if (!empty) {
 // 编辑模式：左键拖空白应该平移画布，而不是框选
 await page.getByRole('button', { name: '只读' }).click()
 await page.waitForTimeout(200)
+await ensureTool('pan')
 const vpBefore = await page.evaluate(
   () => document.querySelector('.react-flow__viewport').style.transform,
 )
-if (empty) {
-  await page.mouse.move(empty.x, empty.y)
+// 刷新之后必须重新找一块空白：上一步把 13 个节点整组拖走了，
+// 开头算出来的那个点可能已经被节点压住——从节点上按下拖的是节点，
+// 视角一动不动，这条断言就会误报成「平移坏了」。
+const paneNow = await page.locator('.react-flow__pane').first().boundingBox()
+const emptyNow = await page.evaluate((r) => {
+  for (const dx of [6, 20, 40, 60, 90, 120]) {
+    for (const dy of [6, 20, 40, 60, 90, 120]) {
+      const el = document.elementFromPoint(r.x + dx, r.y + dy)
+      if (el && el.classList.contains('react-flow__pane')) return { x: r.x + dx, y: r.y + dy }
+    }
+  }
+  return null
+}, paneNow)
+if (emptyNow) {
+  await page.mouse.move(emptyNow.x, emptyNow.y)
   await page.mouse.down()
-  await page.mouse.move(empty.x + 80, empty.y + 60, { steps: 8 })
+  await page.mouse.move(emptyNow.x + 80, emptyNow.y + 60, { steps: 8 })
   await page.mouse.up()
   await page.waitForTimeout(300)
 }
@@ -403,22 +534,28 @@ await page.waitForTimeout(300)
 // ---------------------------------------------------------------- 顶部固定操作条
 {
   const bar = 'div.shrink-0.flex.items-center.flex-wrap'
-  const btn = (name) => page.locator(`${bar} button`, { hasText: name }).first()
+  // 操作条上有的按钮是纯图标（删除 / 折叠 / 新增笔记），没有文字节点，
+  // 只能靠 aria-label 认——这里两种都试，谁命中用谁
+  const btn = (name) =>
+    page
+      .locator(`${bar} button`)
+      .filter({ hasText: name })
+      .or(page.locator(`${bar} button[aria-label="${name}"]`))
+      .first()
 
-  // 只读模式：整条按钮都不可点
-  check('只读模式下操作条「改名」不可点', await btn('改名').isDisabled())
-  check('只读模式下操作条「删除」不可点', await btn('删除').isDisabled())
+  // 只读模式：操作条整条不出现——出现一条永远点不动的按钮纯属占地方
+  check('只读模式下操作条不出现', (await page.locator(bar).count()) === 0)
 
   await page.getByRole('button', { name: '只读' }).click()
   await page.waitForTimeout(300)
 
-  // 编辑模式但没选中任何节点 → 依然不可用
+  // 编辑模式但没选中任何节点 → 操作条同样不出现
   check(
-    '编辑模式下未选中节点时「改名」仍不可点',
-    await btn('改名').isDisabled(),
+    '编辑模式下未选中节点时操作条不出现',
+    (await page.locator(bar).count()) === 0,
   )
 
-  // 选中一个节点后按钮生效
+  // 选中一个节点后操作条出现，按钮生效
   const pick = await page.evaluate(() => {
     const el = [...document.querySelectorAll('.react-flow__node')].find((e) =>
       e.getAttribute('data-id')?.startsWith('nd'),
@@ -428,8 +565,9 @@ await page.waitForTimeout(300)
   const targetBox = await page.locator(`.react-flow__node[data-id="${pick}"]`).boundingBox()
   await page.mouse.click(targetBox.x + targetBox.width / 2, targetBox.y + targetBox.height / 2)
   await page.waitForTimeout(300)
-  check('编辑模式下选中节点后「改名」可点', !(await btn('改名').isDisabled()))
-  check('编辑模式下选中节点后「删除」可点', !(await btn('删除').isDisabled()))
+  check('编辑模式下选中节点后操作条出现', (await page.locator(bar).count()) === 1)
+  check('编辑模式下选中节点后「改名」可点', await btn('改名').isEnabled())
+  check('编辑模式下选中节点后「删除」可点', await btn('删除').isEnabled())
 
   // 点「改名」应该在该节点上出现输入框，并且操作条本身不挡住节点
   await btn('改名').click()
@@ -470,7 +608,7 @@ await page.waitForTimeout(300)
   )
 
   // 只读 + 平移工具 → 拖空白应该挪动画布
-  await page.getByRole('button', { name: '平移', exact: true }).click()
+  await ensureTool('pan')
   await page.waitForTimeout(200)
   const vp1 = await page.evaluate(
     () => document.querySelector('.react-flow__viewport').style.transform,
@@ -495,21 +633,36 @@ await page.waitForTimeout(300)
   // 编辑 + 框选工具 → 拖空白应该框选
   await page.getByRole('button', { name: '只读' }).click()
   await page.waitForTimeout(200)
-  await page.getByRole('button', { name: '框选', exact: true }).click()
+  await ensureTool('select')
   await page.waitForTimeout(200)
-  await page.mouse.move(empty2.x, empty2.y)
+  // 前面的用例把画布平移/缩放过，先「适应画布」把整棵树拉回视野，
+  // 再重新找空白处——拿旧坐标当起点，框出来的可能是一块没有节点的空地
+  await page.locator('.react-flow__controls-fitview').click()
+  await page.waitForTimeout(500)
+  const pane3 = await page.locator('.react-flow__pane').boundingBox()
+  const empty3 = await findEmpty()
+  if (!empty3) {
+    check('编辑模式下切到「框选」也能框选', false, '找不到画布空白处')
+  } else {
+  await page.mouse.move(empty3.x, empty3.y)
   await page.mouse.down()
-  await page.mouse.move(empty2.x + 320, empty2.y + 300, { steps: 10 })
+  // 框到画布右下角：覆盖整块可视区，不用猜节点在哪
+  await page.mouse.move(pane3.x + pane3.width - 8, pane3.y + pane3.height - 8, { steps: 10 })
   const rectN = await page.evaluate(
     () => document.querySelectorAll('.react-flow__selection').length,
   )
   await page.mouse.up()
   await page.waitForTimeout(300)
   const selEdit = await page.locator('.react-flow__node.selected').count()
-  check('编辑模式下切到「框选」也能框选', rectN > 0 && selEdit >= 2, `选中 ${selEdit} 个`)
+  check(
+    '编辑模式下切到「框选」也能框选',
+    rectN > 0 && selEdit >= 2,
+    `选中 ${selEdit} 个 · 选框 ${rectN} 个 · 起点 ${Math.round(empty3.x)},${Math.round(empty3.y)}`,
+  )
 
   await page.getByRole('button', { name: '编辑中' }).click()
   await page.waitForTimeout(300)
+  }
 }
 
 // ---------------------------------------------------------------- 全部收起

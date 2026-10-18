@@ -134,6 +134,17 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(patch),
     }),
+  /**
+   * 按每一章自己的时间区间，用该区间的原文重写摘要与要点。
+   *
+   * 会覆盖现有摘要，所以前端必须先确认；一次请求会打好几次模型，
+   * 长视频可能要等几十秒。
+   */
+  rewriteChapterSummaries: (videoId: number) =>
+    request<{ updated: number; skipped: number; errors: string[] }>(
+      `/videos/${videoId}/chapters/summaries`,
+      { method: 'POST' },
+    ),
   /** 删除章节。若它来自导图节点，后端会一并清掉该节点的时间戳 */
   deleteChapter: (videoId: number, chapterId: number) =>
     request<{ ok: boolean; cleared_node_start: boolean }>(
@@ -148,6 +159,18 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify({ tree, create_chapters: createChapters }),
     }),
+
+  /**
+   * 保存单个节点的 Markdown 笔记。
+   *
+   * 走独立接口而不是 patchMindmap：整树保存会重跑时间整理并同步章节边界，
+   * 写一条笔记不该让任何时间戳或章节跟着动。
+   */
+  saveNodeNote: (videoId: number, nodeId: string, note: string) =>
+    request<{ ok: boolean; node_id: string; note: string; max_length: number }>(
+      `/videos/${videoId}/mindmap/nodes/${encodeURIComponent(nodeId)}/note`,
+      { method: 'PUT', body: JSON.stringify({ note }) },
+    ),
 
   // 视频流地址。后端实现了 Range 请求，<video> 才能拖动进度条。
   streamUrl: (id: number) => `${BASE}/videos/${id}/stream`,

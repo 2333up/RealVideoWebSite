@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
 import type { ProviderInfo, SettingsData } from '../types'
+import { CloseIcon, IconButton } from './icons'
 
 interface Props {
   onClose: () => void
@@ -344,12 +345,12 @@ function Modal({
       >
         <div className="sticky top-0 bg-white border-b px-5 py-3 flex items-center">
           <h2 className="font-semibold text-gray-900">{title}</h2>
-          <button
+          <IconButton
+            icon={<CloseIcon size={18} />}
+            label="关闭"
             onClick={onClose}
-            className="ml-auto text-gray-400 hover:text-gray-700 text-xl leading-none"
-          >
-            ×
-          </button>
+            className="ml-auto hover:text-gray-700 hover:bg-gray-100"
+          />
         </div>
         <div className="p-5">{children}</div>
       </div>
