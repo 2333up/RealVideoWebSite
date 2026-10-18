@@ -469,6 +469,8 @@ YouTube 不会给 CORS 头，结果「页面出来了但播放器没数据」。
 团队协作的全部约定见 [`CONTRIBUTING.md`](CONTRIBUTING.md)：分支模型、提交规范、PR 与 Code Review、
 代码风格、安全红线、新平台接入步骤。
 
+AI 协作任务看板见 [`tasks/README.md`](tasks/README.md)：跨会话发布、认领、完成任务。
+
 仓库维护者（协作者权限、分支保护、默认分支）请另外看 [`docs/GITHUB_SETUP.md`](docs/GITHUB_SETUP.md)。
 
 开源许可：[MIT](LICENSE)。
