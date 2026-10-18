@@ -92,12 +92,14 @@ def load_config():
     # 自动走动参数（frames/speed/pause/duration/fps），缺省则不动
     walk = data.get("walk")
     cfg["walk"] = dict(walk) if isinstance(walk, dict) else {}
+    # 贴边露头用的素材（可选）；没有就退化成普通吸附
+    cfg["peek"] = str(data.get("peek") or "")
     return cfg
 
 
 def save_config(cfg):
     out = {k: cfg[k] for k in ("name", "image", "mode", "animation", "speed",
-                               "scale", "pos", "autostart", "poses", "walk")}
+                               "scale", "pos", "autostart", "poses", "walk", "peek")}
     try:
         with open(cfg["_path"], "w", encoding="utf-8") as f:
             json.dump(out, f, ensure_ascii=False, indent=2)
@@ -340,6 +342,14 @@ class PetWidget(QWidget):
         self._walk_i = 0
         self._walk_frame_t = 0.0
         self._flip = False
+        # 贴边露头：None / "left" / "right"
+        self._dock = None
+        self._peek_draw = QPixmap()
+        self.peek_pix = QPixmap()
+        if cfg.get("peek"):
+            pp = os.path.join(app_dir(), cfg["peek"])
+            if os.path.exists(pp):
+                self.peek_pix = QPixmap(pp)
         self._long_timer = QTimer(self)
         self._long_timer.setSingleShot(True)
         self._long_timer.timeout.connect(self._on_long_press)
@@ -446,6 +456,8 @@ class PetWidget(QWidget):
         self.update()
 
     def _walk_tick(self):
+        if self._dock:
+            return
         w = self.cfg.get("walk") or {}
         frames = w.get("frames") or []
         if not frames:
@@ -500,6 +512,61 @@ class PetWidget(QWidget):
         # 走动会改变位置，停顿后落盘（防抖，避免每步都写文件）
         self._schedule_save()
 
+    # ---------- 贴边露头 ----------
+
+    def _apply_dock_geometry(self):
+        """贴边时窗口直接按探头图的尺寸来，省得中间留一圈空白（空白也会吞点击）。"""
+        g = self._screen_geo()
+        base_h = max(80, int(self.nat_h * self.cfg["scale"] * 0.95))
+        pw, ph = self.peek_pix.width(), max(1, self.peek_pix.height())
+        self._peek_draw = self.peek_pix.scaled(
+            max(60, int(pw * base_h / ph)), base_h,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation)
+        self.disp_w, self.disp_h = self._peek_draw.width(), self._peek_draw.height()
+        self.resize(self._peek_draw.width(), self._peek_draw.height())
+        x = g.left() if self._dock == "left" else g.right() - self.width() + 1
+        self.move(x, g.bottom() - self.height() + 1)
+        self.update()
+
+    def _try_dock(self):
+        """松手时判断是否贴着屏幕左右边缘（6px 容差），是就吸附成探头形态。"""
+        if self.peek_pix.isNull():
+            return False
+        g = self._screen_geo()
+        if self.x() <= g.left() + 6:
+            self._dock_to("left")
+            return True
+        if self.x() + self.width() >= g.right() - 6:
+            self._dock_to("right")
+            return True
+        return False
+
+    def _dock_to(self, side):
+        self._dock = side
+        if self._walking:
+            self._stop_walk(reset_pose=False)
+        self._set_flip(False)
+        self.bubble.hide()
+        self._apply_dock_geometry()
+        # 贴边期间不自动走动：从屏幕边缘自己滑走会很怪
+        self._walk_next = time.monotonic() + 1e9
+
+    def _undock(self):
+        """点一下探头：钻回页面里，并说句话。"""
+        side = self._dock
+        self._dock = None
+        self._peek_draw = QPixmap()
+        self._apply_scale()
+        g = self._screen_geo()
+        inward = 56
+        x = g.left() + inward if side == "left" else g.right() - self.width() - inward
+        x = min(max(g.left(), x), max(g.left(), g.right() - self.width()))
+        self.move(x, g.bottom() - self.height() + 1)
+        self._walk_next = time.monotonic() + 3000
+        self._set_pose("idle")
+        self._react("talk")
+
     def _start_movie(self):
         try:
             self.movie.frameChanged.disconnect()
@@ -522,6 +589,9 @@ class PetWidget(QWidget):
         self.nat_w, self.nat_h = int(pw * f), int(ph * f)
 
     def _apply_scale(self):
+        if self._dock:
+            self._apply_dock_geometry()
+            return
         self.disp_w = max(48, int(self.nat_w * self.cfg["scale"]))
         self.disp_h = max(48, int(self.nat_h * self.cfg["scale"]))
         self.resize(self.disp_w + 12, self.disp_h + 12)
@@ -583,6 +653,17 @@ class PetWidget(QWidget):
         return 0.0, 1.0, 1.0, 0.0
 
     def paintEvent(self, _ev):
+        if self._dock and not self._peek_draw.isNull():
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            if self._dock == "right":
+                # 素材只有「朝右探头」一个朝向，右侧靠镜像复用
+                p.translate(self.width(), 0)
+                p.scale(-1.0, 1.0)
+            p.drawPixmap(0, 0, self._peek_draw)
+            p.end()
+            return
         if self.draw_pix.isNull():
             return
         p = QPainter(self)
@@ -632,6 +713,18 @@ class PetWidget(QWidget):
     def mousePressEvent(self, ev):
         if ev.button() != Qt.MouseButton.LeftButton:
             return
+        if self._dock:
+            # 贴边状态下按住 = 先把头拔出来，然后直接进入拖拽
+            self._undock()
+            self._dragging = True
+            self._moved = False
+            self._handled = False
+            self._press_pos = ev.globalPosition().toPoint()
+            self._press_ms = time.monotonic()
+            self._drag_off = QPoint(self.width() // 2, self.height() // 2)
+            self._long_timer.start(LONG_PRESS_MS)
+            self.raise_()
+            return
         # 按住即停：否则拖拽时窗口还在自己跑，手感像在抢鼠标
         if self._walking:
             self._stop_walk(reset_pose=False)
@@ -663,6 +756,8 @@ class PetWidget(QWidget):
         self._long_timer.stop()
         elapsed = (time.monotonic() - self._press_ms) * 1000
         if self._moved:
+            if self._try_dock():
+                return
             if self.cfg["mode"] == "poses":
                 self._set_pose("idle")
             self._save_pos()

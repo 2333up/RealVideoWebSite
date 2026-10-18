@@ -175,6 +175,8 @@ def main():
     if args.extra:
         poses["drag"] = base + walk_count   # 最后一个 extra 用于「被抓住」
     cfg["poses"] = poses
+    if os.path.exists(os.path.join(args.build, "peek.png")):
+        cfg["peek"] = "peek.png"
     with open(cfg_path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
     print(f"[add] 配置已更新：poses={poses} walk={cfg.get('walk')}")

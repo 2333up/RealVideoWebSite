@@ -90,6 +90,10 @@ def assemble(build_dir, exe_name, exe_path):
     elif img:
         cfg["image"] = copy_resource(img)
 
+    peek = cfg.get("peek")
+    if peek:
+        cfg["peek"] = copy_resource(peek) or ""
+
     for fname in ("pet_config.json", "icon.ico", "main.py"):
         p = os.path.join(build_dir, fname)
         if os.path.exists(p):
