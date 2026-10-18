@@ -92,8 +92,11 @@ def load_config():
     # 自动走动参数（frames/speed/pause/duration/fps），缺省则不动
     walk = data.get("walk")
     cfg["walk"] = dict(walk) if isinstance(walk, dict) else {}
-    # 贴边露头用的素材（可选）；没有就退化成普通吸附
-    cfg["peek"] = str(data.get("peek") or "")
+    # 贴边露头素材：{side, top, bottom}；兼容旧的字符串写法（当作侧边图）
+    pk = data.get("peek")
+    if isinstance(pk, str) and pk:
+        pk = {"side": pk}
+    cfg["peek"] = dict(pk) if isinstance(pk, dict) else {}
     return cfg
 
 
@@ -183,6 +186,11 @@ CLICK_SLOP = 4        # 位移小于该像素仍视为点击（区分拖拽）
 #      而淡化也要 100ms 以上，等于上一帧还没淡完下一帧就来了 —— 全程半透明叠加，
 #      看起来就是持续重影/穿模。sprite 动画本来就应该硬切。
 POSE_FADE_S = 0.09
+
+# 贴边吸附的判定距离（px）：窗口离屏幕某条边小于这个值，松手就吸附成探头。
+# 25px 左右是「我想让她贴边」的合理手感 —— 太小得像在抠像素，太大则
+# 用户随手一放就贴上了，反而不知道怎么让她回屏幕里。
+DOCK_EDGE_PX = 28
 
 # 气泡用随包分发的手写体（霞鹜文楷子集，OFL 授权）。
 # 只打包台词里用到的字，约 53KB；缺失时回退系统字体，不影响功能。
@@ -342,14 +350,22 @@ class PetWidget(QWidget):
         self._walk_i = 0
         self._walk_frame_t = 0.0
         self._flip = False
-        # 贴边露头：None / "left" / "right"
+        # 贴边露头：None 或 {"edge": "left"|"right"|"top"|"bottom", "pos": int}
         self._dock = None
         self._peek_draw = QPixmap()
-        self.peek_pix = QPixmap()
-        if cfg.get("peek"):
-            pp = os.path.join(app_dir(), cfg["peek"])
+        self.peek_pix = {}
+        peek_cfg = cfg.get("peek") or {}
+        # 兼容旧配置：peek 只写了一个文件名（左右贴边共用，右侧镜像）
+        if isinstance(peek_cfg, str):
+            peek_cfg = {"side": peek_cfg}
+        for kind, name in peek_cfg.items():
+            if not name:
+                continue
+            pp = os.path.join(app_dir(), str(name))
             if os.path.exists(pp):
-                self.peek_pix = QPixmap(pp)
+                self.peek_pix[kind] = QPixmap(pp)
+        if "side" not in self.peek_pix and self.peek_pix:
+            self.peek_pix["side"] = next(iter(self.peek_pix.values()))
         self._long_timer = QTimer(self)
         self._long_timer.setSingleShot(True)
         self._long_timer.timeout.connect(self._on_long_press)
@@ -514,36 +530,72 @@ class PetWidget(QWidget):
 
     # ---------- 贴边露头 ----------
 
+    def _peek_for(self, edge):
+        """按边选探头图：左右共用「侧边探头」，上下各一张，缺了就退回侧边。"""
+        key = "side" if edge in ("left", "right") else edge
+        return self.peek_pix.get(key) or self.peek_pix.get("side") or QPixmap()
+
     def _apply_dock_geometry(self):
         """贴边时窗口直接按探头图的尺寸来，省得中间留一圈空白（空白也会吞点击）。"""
         g = self._screen_geo()
-        base_h = max(80, int(self.nat_h * self.cfg["scale"] * 0.95))
-        pw, ph = self.peek_pix.width(), max(1, self.peek_pix.height())
-        self._peek_draw = self.peek_pix.scaled(
+        edge = self._dock["edge"]
+        # 上边缘是「扒住边框垂下来」，露得多一些才看得出姿态；其余边取 0.95
+        factor = 1.3 if edge == "top" else 0.95
+        base_h = max(80, int(self.nat_h * self.cfg["scale"] * factor))
+        src = self._peek_for(edge)
+        pw, ph = src.width(), max(1, src.height())
+        self._peek_draw = src.scaled(
             max(60, int(pw * base_h / ph)), base_h,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation)
         self.disp_w, self.disp_h = self._peek_draw.width(), self._peek_draw.height()
         self.resize(self._peek_draw.width(), self._peek_draw.height())
-        x = g.left() if self._dock == "left" else g.right() - self.width() + 1
-        self.move(x, g.bottom() - self.height() + 1)
+        # 竖边按纵向落点贴、横边按横向落点贴 —— 于是同一条边上任意位置都能停。
+        # ⚠️ 贴边那一维不要走夹取：QRect::right() 返回的是**最后一个像素**坐标
+        #    （left+width-1），所以「紧贴右边缘」的 x 是 right()-w+1，比
+        #    right()-w 多 1。若再拿 right()-w 去夹，会把这 1px 减掉，边缘就
+        #    露出一条 1 像素的缝（探头图的切口因此看得见）。
+        w, h = self.width(), self.height()
+        if edge == "left":
+            x = g.left()
+        elif edge == "right":
+            x = g.right() - w + 1
+        elif edge == "top":
+            y = g.top()
+        else:
+            y = g.bottom() - h + 1
+        if edge in ("left", "right"):
+            # 沿边滑动的那一维仍需夹取：拖到角落时不许把身体顶出屏幕
+            y = min(max(g.top(), g.top() + self._dock["pos"]),
+                    max(g.top(), g.bottom() - h + 1))
+        else:
+            x = min(max(g.left(), g.left() + self._dock["pos"]),
+                    max(g.left(), g.right() - w + 1))
+        self.move(x, y)
         self.update()
 
     def _try_dock(self):
-        """松手时判断是否贴着屏幕左右边缘（6px 容差），是就吸附成探头形态。"""
-        if self.peek_pix.isNull():
+        """松手时判断是否贴着屏幕某条边（28px 容差），是就吸附成探头形态。"""
+        if not self.peek_pix:
             return False
         g = self._screen_geo()
-        if self.x() <= g.left() + 6:
-            self._dock_to("left")
-            return True
-        if self.x() + self.width() >= g.right() - 6:
-            self._dock_to("right")
-            return True
-        return False
+        dist = {
+            "left": self.x() - g.left(),
+            "right": g.right() - (self.x() + self.width()),
+            "top": self.y() - g.top(),
+            "bottom": g.bottom() - (self.y() + self.height()),
+        }
+        # 取最近的一条边，而不是「先判左右再判上下」——否则贴着上边但稍微
+        # 偏左一点，就会被判成左边吸附，落点跟用户预期对不上。
+        best = min(dist, key=lambda e: dist[e])
+        if dist[best] > DOCK_EDGE_PX:
+            return False
+        pos = (self.y() - g.top()) if best in ("left", "right") else (self.x() - g.left())
+        self._dock_to(best, pos)
+        return True
 
-    def _dock_to(self, side):
-        self._dock = side
+    def _dock_to(self, edge, pos):
+        self._dock = {"edge": edge, "pos": int(pos)}
         if self._walking:
             self._stop_walk(reset_pose=False)
         self._set_flip(False)
@@ -553,16 +605,26 @@ class PetWidget(QWidget):
         self._walk_next = time.monotonic() + 1e9
 
     def _undock(self):
-        """点一下探头：钻回页面里，并说句话。"""
-        side = self._dock
+        """点一下探头：沿着原来那条边往屏幕里挪一点，并说句话。"""
+        edge = self._dock["edge"]
+        pos = self._dock["pos"]
         self._dock = None
         self._peek_draw = QPixmap()
         self._apply_scale()
         g = self._screen_geo()
+        w, h = self.width(), self.height()
         inward = 56
-        x = g.left() + inward if side == "left" else g.right() - self.width() - inward
-        x = min(max(g.left(), x), max(g.left(), g.right() - self.width()))
-        self.move(x, g.bottom() - self.height() + 1)
+        if edge == "left":
+            x, y = g.left() + inward, g.top() + pos
+        elif edge == "right":
+            x, y = g.right() - w - inward, g.top() + pos
+        elif edge == "top":
+            x, y = g.left() + pos, g.top() + inward
+        else:
+            x, y = g.left() + pos, g.bottom() - h - inward
+        x = min(max(g.left(), x), max(g.left(), g.right() - w))
+        y = min(max(g.top(), y), max(g.top(), g.bottom() - h))
+        self.move(x, y)
         self._walk_next = time.monotonic() + 3000
         self._set_pose("idle")
         self._react("talk")
@@ -657,7 +719,7 @@ class PetWidget(QWidget):
             p = QPainter(self)
             p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-            if self._dock == "right":
+            if self._dock["edge"] == "right":
                 # 素材只有「朝右探头」一个朝向，右侧靠镜像复用
                 p.translate(self.width(), 0)
                 p.scale(-1.0, 1.0)

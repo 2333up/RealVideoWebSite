@@ -90,9 +90,13 @@ def assemble(build_dir, exe_name, exe_path):
     elif img:
         cfg["image"] = copy_resource(img)
 
+    # peek 支持两种写法：单个文件名（旧配置，只有左右贴边可用，右侧镜像）
+    # 或 {"side": ..., "top": ..., "bottom": ...} 四边各一张。
     peek = cfg.get("peek")
-    if peek:
-        cfg["peek"] = copy_resource(peek) or ""
+    if isinstance(peek, dict):
+        cfg["peek"] = {k: (copy_resource(v) or "") for k, v in peek.items() if v}
+    elif peek:
+        cfg["peek"] = {"side": copy_resource(peek) or ""}
 
     for fname in ("pet_config.json", "icon.ico", "main.py"):
         p = os.path.join(build_dir, fname)

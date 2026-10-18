@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import manifest from './manifest.json'
 
@@ -19,6 +20,12 @@ import manifest from './manifest.json'
  */
 
 type PoseKey = 'idle' | 'drag' | 'double' | 'poke' | 'pat'
+type DockEdge = 'left' | 'right' | 'top' | 'bottom'
+/** pos：左右贴边时是 top(px)，上下贴边时是 left(px) */
+interface DockState {
+  edge: DockEdge
+  pos: number
+}
 type Lines = Record<string, string[]>
 
 const M = manifest as unknown as {
@@ -37,12 +44,19 @@ const FRAME_URLS = import.meta.glob('../../assets/pet/*.webp', {
   query: '?url',
   import: 'default',
 }) as Record<string, string>
-const PEEK_URLS = import.meta.glob('../../assets/pet/peek.webp', {
+const PEEK_URLS = import.meta.glob('../../assets/pet/peek*.webp', {
   eager: true,
   query: '?url',
   import: 'default',
 }) as Record<string, string>
-const PEEK_URL = Object.values(PEEK_URLS)[0] ?? ''
+/** 四边各用一张：左右共用「侧边探头」，右侧靠镜像 */
+const PEEK_BY_EDGE: Record<DockEdge, string> = {
+  left: PEEK_URLS['../../assets/pet/peek.webp'] ?? '',
+  right: PEEK_URLS['../../assets/pet/peek.webp'] ?? '',
+  top: PEEK_URLS['../../assets/pet/peek-top.webp'] ?? '',
+  bottom: PEEK_URLS['../../assets/pet/peek-bottom.webp'] ?? '',
+}
+const PEEK_URL = PEEK_BY_EDGE.left
 
 const FONT_URLS = import.meta.glob('../../assets/pet/*.ttf', {
   eager: true,
@@ -75,8 +89,27 @@ export default function WebPet() {
   const [frame, setFrame] = useState(M.poses.idle ?? 0)
   const [dir, setDir] = useState(1)
   const [bubble, setBubble] = useState<string | null>(null)
-  // 贴边状态：拖到视口左右边缘松开后吸附，只露头
-  const [dock, setDock] = useState<'left' | 'right' | null>(null)
+  // 贴边状态：拖到视口任一边缘松开后吸附，只露头
+  const [dock, setDock] = useState<DockState | null>(null)
+  // 三张探头图的宽高比（渲染时需要，避免先闪一下再回正）
+  const [peekAspect, setPeekAspect] = useState<Record<DockEdge, number>>({
+    left: 0.3, right: 0.3, top: 0.75, bottom: 1.1,
+  })
+
+  useEffect(() => {
+    ;(['left', 'right', 'top', 'bottom'] as DockEdge[]).forEach((edge) => {
+      const url = PEEK_BY_EDGE[edge]
+      if (!url) return
+      const im = new Image()
+      im.onload = () =>
+        setPeekAspect((prev) =>
+          prev[edge] === im.naturalWidth / im.naturalHeight
+            ? prev
+            : { ...prev, [edge]: im.naturalWidth / im.naturalHeight },
+        )
+      im.src = url
+    })
+  }, [])
 
   const wrapRef = useRef<HTMLDivElement>(null)
   const posRef = useRef({ x: -1, y: 8 }) // x=-1 表示尚未初始化
@@ -254,32 +287,57 @@ export default function WebPet() {
   }, [size, bubble, dock, W, applyPos, showPose])
 
   // ---------------------------------------------------------------- 贴边
-  /** 松开时若贴着视口左右边缘，就吸附成「只露头」的形态 */
+  /** 松开时若贴着视口任一边缘，就吸附成「只露头」的形态 */
   const tryDock = useCallback(() => {
     if (!PEEK_URL) return false
     const EDGE = 28
     const x = posRef.current.x
-    if (x <= EDGE) {
-      setBubble(null)
-      setDock('left')
-      return true
+    const yTop = window.innerHeight - posRef.current.y - H
+    const dist: Record<DockEdge, number> = {
+      left: x,
+      right: window.innerWidth - (x + W),
+      top: yTop,
+      bottom: posRef.current.y,
     }
-    if (x >= window.innerWidth - W - EDGE) {
-      setBubble(null)
-      setDock('right')
-      return true
-    }
-    return false
-  }, [W])
+    let best: DockEdge = 'left'
+    let min = Number.POSITIVE_INFINITY
+    ;(['left', 'right', 'top', 'bottom'] as DockEdge[]).forEach((e) => {
+      if (dist[e] < min) {
+        min = dist[e]
+        best = e
+      }
+    })
+    if (min > EDGE) return false
+    setBubble(null)
+    // 竖边记住纵向位置，横边记住横向位置 —— 这样能贴在同一条边的任意高度/位置
+    setDock({ edge: best, pos: best === 'left' || best === 'right' ? yTop : x })
+    return true
+  }, [W, H])
 
   /** 点一下探出来的头：钻回页面里 */
   const undock = useCallback(() => {
     if (!dock) return
     const inward = 56
-    posRef.current.x =
-      dock === 'left'
-        ? Math.min(window.innerWidth - W - 8, inward)
-        : Math.max(8, window.innerWidth - W - inward)
+    const vh = window.innerHeight
+    const vw = window.innerWidth
+    if (dock.edge === 'left') {
+      posRef.current = { x: inward, y: Math.min(Math.max(8, vh - dock.pos - H), vh - H - 8) }
+    } else if (dock.edge === 'right') {
+      posRef.current = {
+        x: Math.max(8, vw - W - inward),
+        y: Math.min(Math.max(8, vh - dock.pos - H), vh - H - 8),
+      }
+    } else if (dock.edge === 'top') {
+      posRef.current = {
+        x: Math.min(Math.max(8, dock.pos), vw - W - 8),
+        y: Math.max(8, vh - H - inward),
+      }
+    } else {
+      posRef.current = {
+        x: Math.min(Math.max(8, dock.pos), vw - W - 8),
+        y: Math.max(8, inward),
+      }
+    }
     setDock(null)
     setFrame(M.poses.idle ?? 0)
     setDir(1)
@@ -373,24 +431,47 @@ export default function WebPet() {
   if (size === 0) return null
 
   // 贴边形态：只露头。素材的裁切边正好贴住视口边缘，看起来像从屏幕外探头。
-  // 右侧用水平镜像复用同一张图（素材只有朝右的一个朝向）。
+  // 四条边用三张图：左右共用侧边探头（右侧镜像），上下各一张。
   if (dock) {
+    const { edge } = dock
+    const h = Math.round(size * (edge === 'top' ? 1.3 : 0.95))
+    const w = Math.round(h * (peekAspect[edge] || 0.5))
+    const vh = window.innerHeight
+    const vw = window.innerWidth
+    // 沿边的位置要夹住，否则拖到角落会露出半边
+    const pos =
+      edge === 'left' || edge === 'right'
+        ? Math.min(Math.max(0, dock.pos), Math.max(0, vh - h))
+        : Math.min(Math.max(0, dock.pos), Math.max(0, vw - w))
+    const style: CSSProperties = {
+      height: h,
+      width: w,
+      filter: 'drop-shadow(0 2px 6px rgba(30, 45, 80, 0.22))',
+    }
+    if (edge === 'left') {
+      style.left = 0
+      style.top = pos
+    } else if (edge === 'right') {
+      style.right = 0
+      style.top = pos
+      style.transform = 'scaleX(-1)'
+    } else if (edge === 'top') {
+      style.top = 0
+      style.left = pos
+    } else {
+      style.bottom = 0
+      style.left = pos
+    }
     return (
       <img
-        src={PEEK_URL}
+        src={PEEK_BY_EDGE[edge]}
         alt=""
         draggable={false}
         onClick={undock}
         onDragStart={(e) => e.preventDefault()}
         title="点一下让我出来"
-        className="fixed bottom-0 z-40 cursor-pointer select-none"
-        style={{
-          height: Math.round(size * 0.95),
-          left: dock === 'left' ? 0 : 'auto',
-          right: dock === 'right' ? 0 : 'auto',
-          transform: dock === 'right' ? 'scaleX(-1)' : undefined,
-          filter: 'drop-shadow(0 2px 6px rgba(30, 45, 80, 0.22))',
-        }}
+        className="fixed z-40 cursor-pointer select-none"
+        style={style}
       />
     )
   }

@@ -15,7 +15,7 @@
 | 操作 | 效果 |
 |---|---|
 | **自动走动** | 每隔 6~14 秒自己走一段（2.5~6 秒），走到屏幕边缘会转身，鼠标悬停即停 |
-| **拖到屏幕边缘** | **吸附并只露头**（双手扒着边缘探头），点击即钻回页面内 |
+| **拖到屏幕任一边缘** | **吸附并只露头**（双手扒着边缘探头），点击即钻回页面内 |
 | 拖拽 | 移动位置，**拖拽时呈「被举起」姿态**（手臂上举、双腿悬空），松手记忆位置 |
 | 单击 | 戳一戳：**切到演唱姿势** + 弹跳 + 随机台词气泡 |
 | 按住 0.7 秒 | 摸头：演唱姿势 + 连续小跳 + 害羞台词 |
@@ -27,14 +27,19 @@
 
 动作结束后自动回到正面待机姿势。首次启动有 1~3 秒延迟，是 onefile 解压，属正常。
 
-### 贴边露头
+### 贴边露头（四边任意位置）
 
-把她拖到**屏幕左/右边缘**松手，会自动吸附成「只露头」的形态：半个身子留在屏幕外，
-双手扒着边缘看着你。点一下（或按住直接拖）就会钻回页面里。
+把她拖到**屏幕左 / 右 / 上 / 下任意一条边**松手，会自动吸附成「只露头」的形态：
+半个身子留在屏幕外，扒着边缘看着你。点一下（或按住直接拖）就会钻回页面里。
 
+- **同一条边上可以停在任意位置**：竖边记住纵向落点，横边记住横向落点，
+  所以能贴在她旁边的窗口高度上，而不只是屏幕最下方。
+- **取最近的一条边**：贴着上边但稍微偏左，也会判成上边吸附 ——
+  按「先判左右再判上下」的顺序会贴错边，落点跟预期对不上。
+- 判定容差 28px：松手时窗口离某条边 28px 以内就算贴上。
 - 贴边期间**不自动走动** —— 从屏幕边缘自己滑走会很怪。
-- 判定容差 6px：松手时窗口离边缘 6px 以内就算贴上。
-- 素材只有「朝右探头」一个朝向，右侧靠**水平镜像**复用，不会出现两个朝向的图。
+- 上下两条边各用一张素材（扒住上边框垂下来 / 从下边框探上来）；
+  左右共用「侧边探头」，右侧靠**水平镜像**复用，不会出现两个朝向的图。
 - 贴边位置**不写进配置**：下次启动她会回到你上次放她的地方，而不是一直挂在边上。
 
 素材处理见 `build-tools/make_peek.py`：生成图里带了一条「墙的边缘」竖线，
@@ -70,7 +75,7 @@
 pet/
 ├── assets/
 │   ├── deepseek-chan-sheet.jpg   角色三视图（构建输入）
-│   ├── gen/                      AI 补生成的素材：走路精灵图 / 被举起 / 探头
+│   ├── gen/                      AI 补生成的素材：走路精灵图 / 被举起 / 探头×3
 │   ├── preview.png               四姿态深底预览
 │   └── fonts/
 │       ├── pet-bubble.ttf        气泡用手写体（53KB 子集）
@@ -79,14 +84,15 @@ pet/
 │   ├── pet_app.py                桌宠主程序模板（多姿态/走动/互动/尺寸）
 │   ├── make_poses.py             三视图 → 多姿态帧（抠底/对齐/统一画布）+ 配置与图标
 │   ├── add_frames.py             追加走路帧与「被举起」帧，并同步配置
-│   ├── make_peek.py              处理「贴边露头」素材（抹掉图的墙边线 + 抠底）
-│   ├── make_bubble_font.py       按台词表裁剪字体子集（改台词后需重跑）
+│   ├── make_peek.py              处理「贴边露头」素材（抹掉图的墙边线 + 抠底）│   ├── make_bubble_font.py       按台词表裁剪字体子集（改台词后需重跑）
 │   ├── make_cutout.py            单张白底图抠图（换单张形象时用）
 │   ├── check_geometry.py         几何探针：打印窗口/绘制尺寸，排查显示异常
 │   └── build_exe.py              PyInstaller 打包 + 成品组装 + 启动自检
 └── build/Jingxi/                 构建工作区（不入库）
     ├── frames/f000..f008.png     正 / 侧 / 背 / 演唱 / 走路×4 / 被举起
-    ├── peek.png                  贴边露头素材
+    ├── peek.png                  贴边露头素材（左 / 右共用，右侧镜像）
+    ├── peek-top.png               贴边露头素材（扒住上边框）
+    ├── peek-bottom.png            贴边露头素材（从下边框探上来）
     ├── fonts/pet-bubble.ttf      气泡字体（打包时整目录复制到成品）
     ├── pet_config.json           名字 / 姿态映射 / 走动参数 / 尺寸 / 位置
     └── dist/Jingxi.exe           打包产物（约 35MB）
@@ -108,7 +114,13 @@ pet/
 姿态映射写在 `pet_config.json` 的 `poses` 里，改映射不用重新打包：
 
 ```json
-"poses": { "idle": 0, "drag": 1, "double": 2, "poke": 3, "pat": 3 }
+"poses": { "idle": 0, "drag": 8, "double": 2, "poke": 3, "pat": 3 }
+```
+
+贴边素材同样在配置里声明，四边各一项（缺哪张也不会崩，会退回 `side`）：
+
+```json
+"peek": { "side": "peek.png", "top": "peek-top.png", "bottom": "peek-bottom.png" }
 ```
 
 ---
@@ -138,6 +150,14 @@ $PET_PY build-tools/make_poses.py --sheet assets/deepseek-chan-sheet.jpg \
 $PET_PY build-tools/add_frames.py --build build/Jingxi \
   --walk-sheet assets/gen/walk-sheet.png --walk-count 4 \
   --extra assets/gen/grab-pose.png
+
+# 2.5 贴边露头素材：左/右、上、下各处理一次（AI 生成图自带「墙边线」，脚本会抹掉）
+$PET_PY build-tools/make_peek.py --src assets/gen/peek-source.png --edge left \
+  --png build/Jingxi/peek.png --webp ../frontend/src/assets/pet/peek.webp --fade-bottom 0.18
+$PET_PY build-tools/make_peek.py --src assets/gen/peek-source-top.png --edge top \
+  --png build/Jingxi/peek-top.png --webp ../frontend/src/assets/pet/peek-top.webp
+$PET_PY build-tools/make_peek.py --src assets/gen/peek-source-bottom.png --edge bottom \
+  --png build/Jingxi/peek-bottom.png --webp ../frontend/src/assets/pet/peek-bottom.webp
 
 # 3. 气泡字体子集（改了 LINES 台词就必须重跑，否则新字的字形会回退系统字体）
 $PET_PY build-tools/make_bubble_font.py --src <霞鹜文楷完整字体.ttf> \
@@ -171,7 +191,7 @@ $PET_PY build-tools/build_exe.py --dir build/Jingxi --exe-name Jingxi --smoke 10
 | 透明置顶盖住其他程序 | ✅ | ❌ 浏览器限制 |
 | 走动 / 戳 / 长按 / 双击 / 气泡 | ✅ | ✅ |
 | 拖拽换位置 | ✅ | ✅（同时支持触摸） |
-| 贴边露头 | ✅ 屏幕边缘 | ✅ 视口边缘，点击钻回 |
+| 贴边露头 | ✅ 屏幕四边任意位置 | ✅ 视口四边任意位置，点击钻回 |
 | 缩放 | 滚轮无级 | 按屏幕宽度自适应固定档，不支持滚轮（会抢页面滚动） |
 | 台词 / 姿态 / 走动参数 | 读 `pet_config.json` | 读导出的 `manifest.json`（同源） |
 
@@ -231,6 +251,10 @@ $PET_PY build-tools/export_web_frames.py --build build/Jingxi --fe ../frontend
 - 气泡出现/消失都有约 120~160ms 的淡入淡出，避免突然弹出来扎眼。
 - 交互判定靠**位移阈值**：按下到松开位移 > 4px 视为拖拽，否则才判点击；
   拖拽中取消长按计时，避免「拖远了停住」被误判成摸头。
+- **贴边那一维不要走「夹回可用区」**：`QRect::right()` 返回的是**最后一个像素**
+  的坐标（`left + width - 1`），所以「紧贴右边缘」的 x 是 `right() - w + 1`，
+  比 `right() - w` 多 1。若再用 `right() - w` 去夹，这 1px 会被减掉，
+  边缘就露出一条缝，探头图的切口正好看得见 —— 只有沿边滑动的那一维才需要夹取。
 - 滚轮连滚时按 400ms 防抖写盘，避免每一格都触发一次 JSON 落盘。
 - 打包脚本会把配置里的 `frames/xxx.png` 改写成扁平文件名（资源被复制到成品根目录），
   这个改写**必须写回成品目录**：只写回构建目录的话，成品启动时找不到图片会直接退出。

@@ -175,8 +175,16 @@ def main():
     if args.extra:
         poses["drag"] = base + walk_count   # 最后一个 extra 用于「被抓住」
     cfg["poses"] = poses
-    if os.path.exists(os.path.join(args.build, "peek.png")):
-        cfg["peek"] = "peek.png"
+    # 四边贴边素材：左右共用「侧边探头」（右侧运行期镜像），上下各一张。
+    # 缺哪张就只保留有的，运行期会退回 side，不会因为有缺口而崩。
+    peek = {}
+    for key, fname in (("side", "peek.png"),
+                       ("top", "peek-top.png"),
+                       ("bottom", "peek-bottom.png")):
+        if os.path.exists(os.path.join(args.build, fname)):
+            peek[key] = fname
+    if peek:
+        cfg["peek"] = peek
     with open(cfg_path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
     print(f"[add] 配置已更新：poses={poses} walk={cfg.get('walk')}")
