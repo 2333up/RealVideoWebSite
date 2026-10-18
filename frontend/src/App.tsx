@@ -1,6 +1,7 @@
 import { Route, Routes } from 'react-router-dom'
 import LingoSeekApp from './LingoSeekApp'
 import VideoMindApp from './videomind/VideoMindApp'
+import ErrorBoundary from './components/ErrorBoundary'
 import WebPet from './components/webPet/WebPet'
 
 /**
@@ -26,8 +27,12 @@ export default function App() {
         <Route path="*" element={<LingoSeekApp />} />
       </Routes>
       {/* 桌宠挂在路由之外：切换页面时不重新挂载，走动/位置状态都能延续。
-          z-40 低于各种浮层（z-50），不会挡住登录、详情、设置这些弹窗。 */}
-      <WebPet />
+          z-40 低于各种浮层（z-50），不会挡住登录、详情、设置这些弹窗。
+          必须用错误边界圈起来：它在 Routes 之外，一旦渲染期抛错会卸载整棵树，
+          灵搜和 video-mind 会一起白屏 —— 一个装饰组件不该有这种破坏力。 */}
+      <ErrorBoundary>
+        <WebPet />
+      </ErrorBoundary>
     </>
   )
 }
