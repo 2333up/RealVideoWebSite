@@ -141,6 +141,43 @@ $PET_PY build-tools/build_exe.py --dir build/Jingxi --exe-name Jingxi --smoke 10
 
 ---
 
+## 网页版（嵌入前端网站）
+
+同一个形象也以**网页形式**嵌在前端里：任意页面右下角悬浮一只，走动、戳一戳、
+长按摸头、双击转身、气泡台词、拖拽换位都与桌面版一致。
+
+**它与 exe 是两套实现，共用素材与台词**：浏览器里做不到「透明置顶盖住其他软件」，
+但页面内的悬浮与互动可以完整复刻。
+
+| 差异点 | 桌面版 exe | 网页版 |
+|---|---|---|
+| 透明置顶盖住其他程序 | ✅ | ❌ 浏览器限制 |
+| 走动 / 戳 / 长按 / 双击 / 气泡 | ✅ | ✅ |
+| 拖拽换位置 | ✅ | ✅（同时支持触摸） |
+| 缩放 | 滚轮无级 | 按屏幕宽度自适应固定档，不支持滚轮（会抢页面滚动） |
+| 台词 / 姿态 / 走动参数 | 读 `pet_config.json` | 读导出的 `manifest.json`（同源） |
+
+- 代码：`frontend/src/components/webPet/WebPet.tsx`，挂在 `App.tsx` 路由之外，
+  切换页面不重新挂载；`z-40` 低于各种弹窗（`z-50`），不会挡住登录/详情/设置。
+- 尺寸：≥1280px 屏 200px 高，≥900 是 170，≥640 是 140，更小的屏直接不显示。
+- 位置记在 `localStorage` 的 `lingoseek.pet.pos`。
+- 遵循 `prefers-reduced-motion`：系统开启「减少动态效果」时不自动走动。
+
+**素材导出**（改了桌宠素材或台词后必须重跑）：
+
+```bash
+$PET_PY build-tools/export_web_frames.py --build build/Jingxi --fe ../frontend
+```
+
+会把 `frames/*.png` 按 480px 高导成 WebP（**5.0MB → 376KB**）写进
+`frontend/src/assets/pet/`，同时生成 `frontend/src/components/webPet/manifest.json`
+（帧列表 / 姿态映射 / 走动参数 / 台词 / 气泡锚点）。
+
+> 为什么必须导出而不是直接引用 PNG：9 帧原始 PNG 合计 5MB，而整个前端 JS 包才 500KB。
+> 网页实际只显示 200px 高，按 2x 导 WebP 就够。
+
+---
+
 ## 与 DeepSeek 娘的差异（如实说明）
 
 | 能力 | 鲸汐 | DeepSeek 娘 |

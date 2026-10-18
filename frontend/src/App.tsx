@@ -1,6 +1,7 @@
 import { Route, Routes } from 'react-router-dom'
 import LingoSeekApp from './LingoSeekApp'
 import VideoMindApp from './videomind/VideoMindApp'
+import WebPet from './components/webPet/WebPet'
 
 /**
  * 单一前端应用的统一路由入口。
@@ -19,9 +20,14 @@ import VideoMindApp from './videomind/VideoMindApp'
  */
 export default function App() {
   return (
-    <Routes>
-      <Route path="/videomind/*" element={<VideoMindApp />} />
-      <Route path="*" element={<LingoSeekApp />} />
-    </Routes>
+    <>
+      <Routes>
+        <Route path="/videomind/*" element={<VideoMindApp />} />
+        <Route path="*" element={<LingoSeekApp />} />
+      </Routes>
+      {/* 桌宠挂在路由之外：切换页面时不重新挂载，走动/位置状态都能延续。
+          z-40 低于各种浮层（z-50），不会挡住登录、详情、设置这些弹窗。 */}
+      <WebPet />
+    </>
   )
 }
