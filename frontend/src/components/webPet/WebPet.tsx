@@ -37,6 +37,13 @@ const FRAME_URLS = import.meta.glob('../../assets/pet/*.webp', {
   query: '?url',
   import: 'default',
 }) as Record<string, string>
+const PEEK_URLS = import.meta.glob('../../assets/pet/peek.webp', {
+  eager: true,
+  query: '?url',
+  import: 'default',
+}) as Record<string, string>
+const PEEK_URL = Object.values(PEEK_URLS)[0] ?? ''
+
 const FONT_URLS = import.meta.glob('../../assets/pet/*.ttf', {
   eager: true,
   query: '?url',
@@ -68,6 +75,8 @@ export default function WebPet() {
   const [frame, setFrame] = useState(M.poses.idle ?? 0)
   const [dir, setDir] = useState(1)
   const [bubble, setBubble] = useState<string | null>(null)
+  // 贴边状态：拖到视口左右边缘松开后吸附，只露头
+  const [dock, setDock] = useState<'left' | 'right' | null>(null)
 
   const wrapRef = useRef<HTMLDivElement>(null)
   const posRef = useRef({ x: -1, y: 8 }) // x=-1 表示尚未初始化
@@ -185,7 +194,7 @@ export default function WebPet() {
       const dt = Math.min(0.05, (now - last) / 1000)
       last = now
       const st = walkRef.current
-      const busy = dragRef.current.active || hoverRef.current || bubble !== null
+      const busy = dragRef.current.active || hoverRef.current || bubble !== null || dock !== null
 
       if (reduce || busy) {
         if (st.walking) {
@@ -242,7 +251,50 @@ export default function WebPet() {
 
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
-  }, [size, bubble, W, applyPos, showPose])
+  }, [size, bubble, dock, W, applyPos, showPose])
+
+  // ---------------------------------------------------------------- 贴边
+  /** 松开时若贴着视口左右边缘，就吸附成「只露头」的形态 */
+  const tryDock = useCallback(() => {
+    if (!PEEK_URL) return false
+    const EDGE = 28
+    const x = posRef.current.x
+    if (x <= EDGE) {
+      setBubble(null)
+      setDock('left')
+      return true
+    }
+    if (x >= window.innerWidth - W - EDGE) {
+      setBubble(null)
+      setDock('right')
+      return true
+    }
+    return false
+  }, [W])
+
+  /** 点一下探出来的头：钻回页面里 */
+  const undock = useCallback(() => {
+    if (!dock) return
+    const inward = 56
+    posRef.current.x =
+      dock === 'left'
+        ? Math.min(window.innerWidth - W - 8, inward)
+        : Math.max(8, window.innerWidth - W - inward)
+    setDock(null)
+    setFrame(M.poses.idle ?? 0)
+    setDir(1)
+    say('talk')
+    try {
+      localStorage.setItem(POS_KEY, JSON.stringify(posRef.current))
+    } catch {
+      /* ignore */
+    }
+  }, [dock, W, say])
+
+  // 出边后把窗口摆回新位置（贴边期间 wrapper 不渲染，transform 需要重算）
+  useEffect(() => {
+    if (!dock) applyPos()
+  }, [dock, applyPos])
 
   // ---------------------------------------------------------------- 交互
   const onPointerDown = (e: ReactPointerEvent<HTMLImageElement>) => {
@@ -298,6 +350,7 @@ export default function WebPet() {
       /* ignore */
     }
     if (st.moved) {
+      if (tryDock()) return
       try {
         localStorage.setItem(POS_KEY, JSON.stringify(posRef.current))
       } catch {
@@ -318,6 +371,29 @@ export default function WebPet() {
   }
 
   if (size === 0) return null
+
+  // 贴边形态：只露头。素材的裁切边正好贴住视口边缘，看起来像从屏幕外探头。
+  // 右侧用水平镜像复用同一张图（素材只有朝右的一个朝向）。
+  if (dock) {
+    return (
+      <img
+        src={PEEK_URL}
+        alt=""
+        draggable={false}
+        onClick={undock}
+        onDragStart={(e) => e.preventDefault()}
+        title="点一下让我出来"
+        className="fixed bottom-0 z-40 cursor-pointer select-none"
+        style={{
+          height: Math.round(size * 0.95),
+          left: dock === 'left' ? 0 : 'auto',
+          right: dock === 'right' ? 0 : 'auto',
+          transform: dock === 'right' ? 'scaleX(-1)' : undefined,
+          filter: 'drop-shadow(0 2px 6px rgba(30, 45, 80, 0.22))',
+        }}
+      />
+    )
+  }
 
   return (
     <>
