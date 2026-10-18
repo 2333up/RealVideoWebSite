@@ -5,9 +5,21 @@ import { CloseIcon, IconButton } from './icons'
 
 interface Props {
   onClose: () => void
+  /**
+   * 只渲染「大模型」区块。
+   *
+   * 灵搜（搜索页）复用了这个面板 —— 它只需要配置大模型供应商与密钥，
+   * 而「语音转写」「分章节参数」是 video-mind 的专属设置，出现在搜索页
+   * 只会让人困惑「搜视频为什么要配 Whisper」。故由调用方按需收窄。
+   *
+   * 默认 false，即 video-mind 侧的行为与之前完全一致。
+   */
+  onlyLlm?: boolean
 }
 
-export default function SettingsPanel({ onClose }: Props) {
+export default function SettingsPanel({ onClose, onlyLlm = false }: Props) {
+  // 标题随用途变化：灵搜里叫「大模型设置」更贴合，完整面板仍叫「设置」
+  const title = onlyLlm ? '大模型设置' : '设置'
   const [data, setData] = useState<SettingsData | null>(null)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
@@ -22,14 +34,14 @@ export default function SettingsPanel({ onClose }: Props) {
 
   if (error) {
     return (
-      <Modal onClose={onClose} title="设置">
+      <Modal onClose={onClose} title={title}>
         <div className="text-red-600 text-sm">加载设置失败：{error}</div>
       </Modal>
     )
   }
   if (!data) {
     return (
-      <Modal onClose={onClose} title="设置">
+      <Modal onClose={onClose} title={title}>
         <div className="text-gray-400 text-sm">加载中…</div>
       </Modal>
     )
@@ -83,7 +95,7 @@ export default function SettingsPanel({ onClose }: Props) {
   const curAsr = data.asr_providers.find((p) => p.id === data.current.asr_provider)
 
   return (
-    <Modal onClose={onClose} title="设置">
+    <Modal onClose={onClose} title={title}>
       <div className="space-y-6 text-sm">
         {error && (
           <div className="bg-red-50 border border-red-200 text-red-700 rounded px-3 py-2 text-xs">
@@ -92,7 +104,7 @@ export default function SettingsPanel({ onClose }: Props) {
         )}
 
         {/* ---------------- LLM ---------------- */}
-        <Section title="大模型（分章节与导图）">
+        <Section title={onlyLlm ? '大模型 API' : '大模型（分章节与导图）'}>
           <div className="grid grid-cols-3 gap-2">
             {data.llm_providers.map((p) => (
               <ProviderCard
@@ -173,6 +185,9 @@ export default function SettingsPanel({ onClose }: Props) {
           )}
         </Section>
 
+        {/* ASR 与处理参数都属于 video-mind 的转写管线，灵搜侧不显示（onlyLlm） */}
+        {!onlyLlm && (
+          <>
         {/* ---------------- ASR ---------------- */}
         <Section title="语音转写（ASR）">
           <div className="grid grid-cols-3 gap-2">
@@ -287,6 +302,9 @@ export default function SettingsPanel({ onClose }: Props) {
             </Field>
           </div>
         </Section>
+
+          </>
+        )}
 
         {testMsg && (
           <div

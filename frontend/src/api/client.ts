@@ -112,6 +112,39 @@ export interface LoginPollData {
   account: AccountBrief | null
 }
 
+// ---------------------------------------------------------------- 追番
+
+/** 搜索候选（也用于从候选里选择添加） */
+export interface AnimeCandidate {
+  subject_id: number
+  title: string
+  title_original: string
+  cover_url: string
+  /** 数据源给出的更新描述原文，如「第03集」「第12集(完结)」 */
+  latest_label: string
+  latest_eps: number
+  status: string
+  premiere: string
+  intro: string
+  followed: boolean
+}
+
+export interface AnimeFollow {
+  id: number
+  subject_id: number
+  source: string
+  title: string
+  cover_url: string
+  /** 已播出的最新正片话数（来自数据源） */
+  latest_eps: number
+  /** 用户已看话数 */
+  watched_eps: number
+  latest_label: string
+  last_checked_at: string | null
+  created_at: string
+  has_update: boolean
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response
   try {
@@ -223,6 +256,46 @@ export const api = {
       `/accounts/verify${platform ? `?platform=${platform}` : ''}`,
       { method: 'POST' },
     ),
+
+  // -------------------------------------------------------------- 追番
+
+  /** 按番剧名搜索候选 */
+  animeSearch: (keyword: string, page = 1) =>
+    request<{ keyword: string; items: AnimeCandidate[] }>(
+      `/anime/search?q=${encodeURIComponent(keyword)}&page=${page}`,
+    ),
+
+  animeList: () => request<AnimeFollow[]>('/anime/follows'),
+
+  animeAdd: (subjectId: number) =>
+    request<AnimeFollow>('/anime/follows', {
+      method: 'POST',
+      body: JSON.stringify({ subject_id: subjectId }),
+    }),
+
+  animeRemove: (id: number) =>
+    request<{ message: string }>(`/anime/follows/${id}`, { method: 'DELETE' }),
+
+  /** 标记已看话数（消除红点） */
+  animeMarkWatched: (id: number, watchedEps: number) =>
+    request<AnimeFollow>(`/anime/follows/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ watched_eps: watchedEps }),
+    }),
+
+  /** 检测哪些追番有新话 */
+  animeUpdates: () =>
+    request<{ checked: number; updated: AnimeFollow[] }>('/anime/updates'),
+
+  /**
+   * 番剧详情页（同源代理）。
+   * agedm 带 X-Frame-Options: SAMEORIGIN，跨站 iframe 会被浏览器拒绝，
+   * 必须走后端代理转成同源页面才能嵌入。
+   */
+  animeEmbedUrl: (subjectId: number) => `/api/anime/embed?subject_id=${subjectId}`,
+
+  /** 到 agedm 站内观看（播放器是嵌套 iframe，无法在应用内代理播放） */
+  animeSiteUrl: (subjectId: number) => `https://www.agedm.io/detail/${subjectId}`,
 }
 
 // ------------------------------------------------------------------ 展示工具

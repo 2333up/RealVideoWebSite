@@ -15,6 +15,10 @@ import AccountPanel from './components/AccountPanel'
 import VideoDetailModal from './components/VideoDetailModal'
 import XhsEmbedResult from './components/XhsEmbedResult'
 import DouyinEmbedResult from './components/DouyinEmbedResult'
+// 大模型设置与大模型密钥是**两个产品共用**的一份配置（存在 video-mind/backend/.env）。
+// 因此灵搜直接复用 video-mind 的 SettingsPanel 并只取其中的「大模型」区块，
+// 而不是另写一套：两套 UI 各自演进，迟早会出现「这边改了 key 那边看不到」。
+import SettingsPanel from './videomind/components/SettingsPanel'
 
 const ORDER_OPTIONS: { key: SearchOrder; label: string; hint: string }[] = [
   { key: 'relevance', label: '综合排序', hint: '沿用平台的原生综合相关度' },
@@ -59,6 +63,7 @@ const FOLLOWER_OPTIONS: { label: string; value: number | null }[] = [
 // （见 src/App.tsx），同源同端口，直接客户端跳转即可 —— 不再需要
 // 新开标签页，也不需要探测它是否启动（同一个 dev server，起没起一目了然）。
 const VIDEOMIND_URL = '/videomind/'
+const ANIME_URL = '/anime'
 
 /** 卡片固定 250×210，由 auto-fill 决定每行列数，随浏览器宽度自适应 */
 const CARD_W = 250
@@ -92,6 +97,8 @@ export default function App() {
   const [loginOpen, setLoginOpen] = useState(false)
   const [panelOpen, setPanelOpen] = useState(false)
   const [loginPlatform, setLoginPlatform] = useState<PlatformMeta | null>(null)
+  // 大模型 API 设置浮层（复用 video-mind 的 SettingsPanel，只显示大模型区块）
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   const inputRef = useRef<HTMLInputElement>(null)
   // 底部哨兵：滚动到其附近时自动加载下一批
@@ -126,6 +133,27 @@ export default function App() {
       setAccounts(res.accounts)
     } catch {
       /* 静默失败，面板会保留上一次数据 */
+    }
+  }, [])
+
+  // ---- 追番更新提醒 ----
+  // 首屏检测一次即可（任务约定不做轮询）。后端不可达时静默失败，
+  // 不能因为追番服务异常让搜索页也跟着报错。
+  const [animeUpdateCount, setAnimeUpdateCount] = useState(0)
+  const [animeBannerOpen, setAnimeBannerOpen] = useState(true)
+  useEffect(() => {
+    let alive = true
+    void (async () => {
+      try {
+        const res = await api.animeUpdates()
+        if (!alive) return
+        setAnimeUpdateCount(res.updated.length)
+      } catch {
+        /* 静默：追番不可用不影响搜索 */
+      }
+    })()
+    return () => {
+      alive = false
     }
   }, [])
 
@@ -325,6 +353,37 @@ export default function App() {
               <span className="hidden md:block">Video-Mind</span>
             </Link>
 
+            {/* 追番入口：有更新时显示红点。进站横幅与红点都靠这里那一次检测。 */}
+            <Link
+              to={ANIME_URL}
+              className="relative flex shrink-0 items-center gap-1.5 rounded-lg border border-ink-100 bg-white py-1 pl-2 pr-2.5
+                         text-xs font-medium text-ink-700 transition-colors hover:border-ink-300"
+              title="追番 · 更新提醒"
+            >
+              <span aria-hidden>📺</span>
+              <span className="hidden md:block">追番</span>
+              {animeUpdateCount > 0 ? (
+                <span
+                  className="absolute -right-1 -top-1 flex h-4 min-w-[16px] items-center justify-center
+                             rounded-full bg-bilibili px-1 text-[10px] font-semibold leading-none text-white"
+                >
+                  {animeUpdateCount > 99 ? '99+' : animeUpdateCount}
+                </span>
+              ) : null}
+            </Link>
+
+            {/* 大模型 API 设置：与 video-mind 共用同一份配置，见顶部 import 注释 */}
+            <button
+              type="button"
+              onClick={() => setSettingsOpen(true)}
+              className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-lg border border-ink-100
+                         bg-white text-sm text-ink-700 transition-colors hover:border-ink-300"
+              title="大模型 API 设置（与 Video-Mind 共用）"
+              aria-label="大模型 API 设置"
+            >
+              <span aria-hidden>⚙</span>
+            </button>
+
             {/* 账号入口（精简高度） */}
             <button
               type="button"
@@ -352,6 +411,32 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {/* ---------------- 追番进站横幅 ----------------
+          仅在有更新且用户未关闭时出现。一条细横幅，不做卡片，避免抢搜索区的注意力。 */}
+      {animeUpdateCount > 0 && animeBannerOpen ? (
+        <div className="border-b border-bilibili/25 bg-bilibili-soft">
+          <div className="mx-auto flex max-w-[1400px] items-center gap-2 px-5 py-1.5">
+            <Link
+              to={ANIME_URL}
+              className="flex min-w-0 flex-1 items-center gap-2 text-xs text-bilibili-deep hover:underline"
+            >
+              <span aria-hidden>📺</span>
+              <span className="font-medium">{animeUpdateCount} 部追番更新了</span>
+              <span aria-hidden>›</span>
+            </Link>
+            <button
+              type="button"
+              onClick={() => setAnimeBannerOpen(false)}
+              className="shrink-0 rounded px-1 text-xs text-ink-500 transition-colors hover:text-ink-700"
+              title="关闭提醒"
+              aria-label="关闭追番更新提醒"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {/* ---------------- 筛选区 ----------------
           改动筛选条件后会自动重新检索（见下方 filterKey 副作用） */}
@@ -677,10 +762,6 @@ export default function App() {
               一次搜索，
               <span style={{ color: platformColor }}>看遍</span>视频与图文
             </h2>
-            <p className="mx-auto mt-3 max-w-xl text-sm leading-relaxed text-ink-500">
-              输入关键词后，引擎会从视频与图文两条通道并行下探、自动翻页取满结果，
-              剔除搬运与重复内容，按平台原生排序列出全部收获。
-            </p>
 
             <div className="mx-auto mt-8 grid max-w-3xl gap-3 sm:grid-cols-3">
               {[
@@ -741,6 +822,12 @@ export default function App() {
           fallback={detailTarget.fallback}
           onClose={() => setDetailTarget(null)}
         />
+      ) : null}
+
+      {/* 大模型 API 设置：onlyLlm 只渲染大模型区块，
+          语音转写与分章节参数是 video-mind 专属，不在此出现 */}
+      {settingsOpen ? (
+        <SettingsPanel onlyLlm onClose={() => setSettingsOpen(false)} />
       ) : null}
 
       {loginPlatform ? (

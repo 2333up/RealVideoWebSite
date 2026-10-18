@@ -2,7 +2,19 @@
 
 **主动推荐式视频/图文搜索引擎** —— 输入关键词，引擎替你把不值得看的内容筛掉。
 
-当前已接入 **哔哩哔哩**（视频 + 图文双路），架构上为抖音、YouTube 等平台预留了标准插槽。
+当前已接入 **哔哩哔哩、抖音、小红书、YouTube** 四个平台。四者能力差别很大，
+下表如实列出（**勿夸大**，各平台的限制与坑点见后文对应小节）：
+
+| 平台 | 内容形态 | 检索方式 | 登录 | 评论 | 互动量门槛 | 下载 |
+|---|---|---|---|---|---|---|
+| 哔哩哔哩 | 视频 + 图文 | HTTP（WBI 签名） | 扫码登录（可选） | ✅ | ✅ | ✅ 最高 1080P |
+| 抖音 | 仅视频 | Playwright 浏览器自动化 | 手动注入 Cookie（搜索必需） | ❌ | ❌ | ❌ |
+| 小红书 | 视频 + 图文 | Playwright 浏览器自动化 | 手动注入 Cookie（必需） | ❌ | ❌ | ❌ |
+| YouTube | 仅视频 | HTTP（SSR 直出，无需签名） | 无需登录 | ❌ | ❌ | ✅ yt-dlp |
+
+> 「无评论 / 无门槛过滤」不是没做完，而是平台侧拿不到对应数据：
+> 适配器未实现 `fetch_comments` 时前端自动隐藏评论区，`supports_thresholds=False`
+> 时前端不渲染那两个下拉框 —— 而不是发出注定返回空列表的请求。
 
 ---
 
@@ -89,8 +101,19 @@ page=1~6 连续抓取 → 每页均 20 条，累计 140 条，全局去重后仍
 cd backend
 python -m venv .venv && .venv/Scripts/activate    # Windows
 pip install -r requirements.txt
+playwright install chromium                       # 抖音 / 小红书检索依赖（只搜 B 站可跳过）
 python -m uvicorn main:app --host 127.0.0.1 --port 8000
 ```
+
+> **哪些依赖是「按需」的？** 只想搜 B 站的话，装完 `requirements.txt` 就能跑；
+> 下表说明其余依赖各自影响什么、不装会怎样：
+>
+> | 依赖 | 影响 | 不装的后果 |
+> |---|---|---|
+> | `playwright` + chromium | 抖音、小红书检索 | 这两个平台会返回「需要浏览器」类的错误，B 站不受影响 |
+> | `yt-dlp`（已在 requirements） | YouTube 取流与下载 | YouTube 搜索/详情正常，点下载才失败 |
+> | `ffmpeg` | B 站 1080P 与 YouTube 音视频合并 | 高画质档位置灰，低画质直链照常 |
+> | `YOUTUBE_PROXY`（`.env`） | YouTube 连通性 | 国内网络下 YouTube 一律超时 |
 
 **前端（Vite · :5173）**
 
@@ -115,6 +138,9 @@ npm run dev
 
 > 登录的价值：绕过游客风控、获得更完整的搜索配额与个性化结果。不登录也能正常使用。
 
+> **只有哔哩哔哩支持扫码登录。** 抖音、小红书没有可用的扫码流程，只能手动粘贴
+> 浏览器 Cookie（见后文各平台小节）；YouTube 无需登录。
+
 ---
 
 ## 项目结构
@@ -124,7 +150,7 @@ RealVideoWebSite/
 ├── backend/
 │   ├── main.py                      # FastAPI 入口与生命周期
 │   ├── app/
-│   │   ├── core/                    # 配置 / 数据库 / 凭据加密
+│   │   ├── core/                    # 配置 / 数据库 / 凭据加密 / ffmpeg 探测与合并
 │   │   ├── models/account.py        # 平台账号 ORM（跨平台通用表）
 │   │   ├── platforms/
 │   │   │   ├── base.py              # ★ 平台抽象契约 ContentItem / PlatformAdapter
@@ -136,14 +162,17 @@ RealVideoWebSite/
 │   │   │   ├── douyin/
 │   │   │   │   ├── adapter.py       # 热榜 + 浏览器自动化搜索
 │   │   │   │   └── browser_search.py  # Playwright 绕过 a_bogus
-│   │   │   └── xiaohongshu/
-│   │   │       ├── adapter.py       # 笔记检索与结构归一化
-│   │   │       └── browser_search.py  # Playwright 绕过 X-s/X-t
+│   │   │   ├── xiaohongshu/
+│   │   │   │   ├── adapter.py       # 笔记检索与结构归一化
+│   │   │   │   └── browser_search.py  # Playwright 绕过 X-s/X-t
+│   │   │   └── youtube/
+│   │   │       └── adapter.py       # SSR 解析 + 游标翻页 + yt-dlp 取流（本仓最重的适配器）
 │   │   ├── recommend/
 │   │   │   ├── scorer.py            # 五维打分 + 质量体检
 │   │   │   ├── dedup.py             # 精确/模糊/作者配额三级去重
+│   │   │   ├── relevance.py         # 语义指纹（保序去噪）
 │   │   │   └── service.py           # 推荐流水线编排
-│   │   ├── routers/                 # search · account
+│   │   ├── routers/                 # search · account · hot · embed · download
 │   │   ├── schemas/api.py           # API 契约
 │   │   └── services/                # 账号增删改查与登录态体检
 │   └── data/app.db                  # SQLite（首次运行自动生成）
@@ -159,11 +188,20 @@ RealVideoWebSite/
 │   │   │   └── lib/                 #   mindmapLayout / seekRequest
 │   │   └── components/
 │   │       ├── ResultCard.tsx       # 结果卡片 + 评分解释
+│   │       ├── VideoDetailModal.tsx # 详情浮层：自绘详情 + 评论 + 播放器
+│   │       ├── CommentSection.tsx   # 评论区（最热/最新、楼中楼、分页）
 │   │       ├── LoginModal.tsx       # 扫码登录浮窗
 │   │       └── AccountPanel.tsx     # 账号管理抽屉
-│   └── vite.config.ts               # /api 与 /videomind/api 反向代理到 :8000
+│   ├── scripts/                     # 实跑验收脚本（无单测，靠它兜底）
+│   │   ├── e2e-smoke.mjs            # 端到端冒烟：搜索/浮层/video-mind 分流
+│   │   ├── check-layout.mjs         # 导图布局几何断言
+│   │   └── probe-mindmap.mjs        # 导图交互探针
+│   └── vite.config.ts               # /api 与 /videomind/* 反向代理到 :8000
 ├── video-mind/
 │   └── backend/                     # video-mind 后端（由主后端挂载到 /videomind）
+├── pet/                             # 鲸汐 · 桌面宠物（PyQt6 独立 exe，不参与 web 服务）
+│   ├── assets/                      #   原图 / 抠好的透明 PNG / 效果预览
+│   └── build-tools/                 #   桌宠程序模板 + 抠图 / 打包脚本
 └── start.bat                        # 一键启动
 ```
 
@@ -171,6 +209,9 @@ RealVideoWebSite/
 > 浏览器访问 <http://127.0.0.1:5173> 是灵搜；
 > <http://127.0.0.1:5173/videomind/> 是 video-mind（本地视频分章节 + 思维导图），
 > 两者在同一页面内互相跳转。
+>
+> `pet/` 不在这两个服务里：它是独立的 Windows 桌面程序，打包成 exe 后与本仓库的
+> web 服务完全解耦，源码只是放在同一个仓库里维护。
 
 ---
 
@@ -288,6 +329,60 @@ Cookie 与 B 站/抖音账号一样经 Fernet 加密存于本机 SQLite。
 > 已知限制：`search/notes` 返回的 `note_card` 不含播放量，笔记的点赞/收藏/评论/分享数真实返回。
 > 我们如实展示，不伪造数据。详情接口 `fetch_detail` 同样受 `X-s` 保护，当前未实现。
 
+### YouTube 平台的真实能力（重要，勿夸大）
+
+YouTube 与抖音、小红书有**根本区别**：搜索结果是服务端渲染（SSR）直出的，
+页面里就有一份完整的 `ytInitialData` JSON，**不需要任何签名、也不需要 Playwright** ——
+普通 HTTP 抓取即可解析。本项目因此**没有**为它引入浏览器自动化。
+
+| 能力 | 状态 | 实现方式 |
+|---|---|---|
+| 关键词搜索 | ✅ 可用 | 抓 `/results` 页面里的 `ytInitialData` |
+| 翻页 / 加载更多 | ✅ 可用 | POST `/youtubei/v1/search` 走 continuation 游标 |
+| 详情 | ✅ 可用 | `ytInitialPlayerResponse.videoDetails`（同样直出） |
+| 下载 | ✅ 可用 | **交给 `yt-dlp`** 解签名取流，服务端流式转发 |
+| 评论 / 登录 / 互动量门槛 | ❌ 未实现 | 前端自动隐藏，不发无用请求 |
+
+#### 两个解析坑（YouTube 改版实证，2026-10）
+
+1. **搜索结果节点换了类型。** 2025 起首屏同时存在新的 `lockupViewModel` 与老的
+   `videoRenderer`，实测一屏 12 个 `videoRenderer` + 11 个 `lockupViewModel` ——
+   只认老结构会**静默丢掉近一半结果**。现在两种都收集并打 `__node_kind` 标记，
+   且 lockup 的文本形态是 `{"content": ...}`（不是 `simpleText`/`runs`），需单独取值函数。
+2. **翻页游标不在 `ytInitialData` 里。** SSR 首屏不再内嵌，`continuationCommand`
+   出现在 **HTML 正文**里；翻页必须 POST `/youtubei/v1/search`
+   （用 `/browse` 会**静默返回空**，不报错），且必须取**最后一个** token ——
+   页面前面几个是筛选 chip 的 continuation，用它们只会拿到被筛过的子集。
+   `apiKey` / `clientVersion` / `visitorData` 全部从首屏 `ytcfg.set()` 现取，写死必失效。
+
+#### 下载：为什么不自研签名解密
+
+`ytInitialPlayerResponse` 里的流**既没有 `url` 也没有 `signatureCipher`** ——
+真实地址藏在播放器 JS 背后，需要解出签名并处理 `n` 参数 / PO token。
+自建这套 decipher 是与 YouTube 长期对抗的维护陷阱，所以下载交给 `yt-dlp`，
+本项目只负责「取直链 + 流式转发」。YouTube 的流是**音视频分离**的，
+要拿到带声音的完整视频必须由 ffmpeg 合并（下载时 `format_id=merge`）。
+
+#### 网络：代理必须显式配置
+
+YouTube 在多数办公/家庭网络下无法直连。**不能依赖环境里的 `HTTP_PROXY`** ——
+那类变量常指向只允许内网白名单的代理，访问 youtube.com 会直接返回 **502**。
+因此代理必须显式写进 `backend/.env` 的 `YOUTUBE_PROXY`，且请求一律 `trust_env=False`，
+避免被环境代理静默劫持。
+
+#### 嵌入：只能服务端代理成同源
+
+YouTube 的 `/watch` 带 `X-Frame-Options: SAMEORIGIN`，**无法跨域 iframe**；
+`/embed/` 虽然没有该响应头，但实测仍起不来。要显示原网页只有一条路：服务端代理。
+而只代理 HTML 又不够 —— 页面 JS 会 POST 到 `youtubei/v1/player`，从本站源发出属跨域，
+YouTube 不会给 CORS 头，结果「页面出来了但播放器没数据」。解决办法是注入一段 shim，
+把 youtube 域的 `fetch`/XHR/`sendBeacon` 改道到同源 `/api/platforms/youtube/proxy`。
+
+> ⚠️ **安全红线**：`/api/platforms/youtube/proxy` 本质是「代用户取任意 URL」，
+> 必须保留域名白名单（`youtube.com` / `ytimg.com` / `ggpht.com` / `googlevideo.com` /
+> `gstatic.com`），否则等于把本机网络敞开给外部调用者（可探测内网、读云元数据）。
+> 该白名单是 SSRF 防线，不要为了方便调试而放宽。
+
 ### 详情浮层：点击结果不跳走
 
 点击结果卡片会在**居中浮层**内打开详情，而不是跳到平台页面。
@@ -349,10 +444,32 @@ Cookie 与 B 站/抖音账号一样经 Fernet 加密存于本机 SQLite。
 
 ---
 
+## 桌面宠物（`pet/`）
+
+同一个仓库里的第三个产品：一只透明置顶的 Windows 桌宠「鲸汐」，PyQt6 实现，
+打包成独立 exe。**与灵搜、video-mind 没有任何代码依赖**，也不会被 web 服务加载。
+
+- 形象：角色三视图（正 / 侧 / 背 / 演唱）+ AI 补生成的**四帧走路循环**与**被举起姿态**，
+  共 9 帧，按脚底对齐后切换不跳动。
+- 交互：**自动在桌面走动**（边缘转身、鼠标悬停即停）、拖拽时呈「被举起」形态、
+  **拖到屏幕四边任一条会吸附成「只露头」，且能停在同一条边的任意位置**（点一下钻回）、
+  单击戳一戳（切演唱姿势）、长按摸头、双击转身、**滚轮无级缩放**、右键菜单、托盘。
+- 尺寸：默认约屏高 23%（1080p ≈ 237px），可在 20%~200% 间自由调节，位置与尺寸都会记忆。
+- 打包产物输出到 `桌面\桌宠\Jingxi\`，`pet/build/` 与 `dist/` 不入库。
+- **网页版**：同一形象也嵌在前端里（任意页面右下角，`frontend/src/components/webPet/`），
+  走动/戳一戳/气泡/拖拽/**视口四边贴边**都能用；素材由 `pet/build-tools/export_web_frames.py`
+  导成 WebP（5MB → 376KB）。浏览器做不到桌面版的「透明置顶盖住其他软件」。
+
+构建命令、台词修改、素材抠图与技术细节见 [`pet/README.md`](pet/README.md)。
+
+---
+
 ## 参与开发
 
 团队协作的全部约定见 [`CONTRIBUTING.md`](CONTRIBUTING.md)：分支模型、提交规范、PR 与 Code Review、
 代码风格、安全红线、新平台接入步骤。
+
+AI 协作任务看板见 [`tasks/README.md`](tasks/README.md)：跨会话发布、认领、完成任务。
 
 仓库维护者（协作者权限、分支保护、默认分支）请另外看 [`docs/GITHUB_SETUP.md`](docs/GITHUB_SETUP.md)。
 

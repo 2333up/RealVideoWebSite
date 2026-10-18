@@ -19,10 +19,12 @@ from app.platforms.douyin.adapter import DouyinAdapter
 from app.platforms.xiaohongshu.adapter import XiaohongshuAdapter
 from app.platforms.youtube.adapter import YouTubeAdapter
 from app.routers import account as account_router
+from app.routers import anime as anime_router
 from app.routers import download as download_router
 from app.routers import embed as embed_router
 from app.routers import hot as hot_router
 from app.routers import search as search_router
+from app.services.agedm_client import agedm_client
 
 logging.basicConfig(
     level=logging.INFO if settings.DEBUG else logging.WARNING,
@@ -71,6 +73,12 @@ async def lifespan(_app: FastAPI):
                 await close()
             except Exception:  # noqa: BLE001 - 关闭阶段异常无需传播
                 pass
+
+    # 追番数据源客户端（不在 registry 里，单独释放）
+    try:
+        await agedm_client.aclose()
+    except Exception:  # noqa: BLE001
+        pass
     logger.info("应用已停止")
 
 
@@ -94,6 +102,7 @@ app.include_router(account_router.router)
 app.include_router(hot_router.router)
 app.include_router(embed_router.router)
 app.include_router(download_router.router)
+app.include_router(anime_router.router)
 
 
 # ---------------------------------------------------------------------------

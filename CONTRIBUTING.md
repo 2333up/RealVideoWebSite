@@ -15,6 +15,28 @@
 | 代码审查 | 每个 PR 至少 1 人 Approve |
 | 语言 | 代码注释与文档用中文，标识符用英文 |
 
+### 重大修改：先提议，再动手（对人也对 Agent）
+
+改动若属于**重大修改**，**不要直接写完再给人看**。先说明「打算怎么做、动哪些文件与接口、
+风险与替代方案」，等维护者决定是「现在就改」还是「先继续讨论」，拿到明确同意后再落地。
+
+判定标准（满足任一条即算）：改公开契约（`SearchParams` / `ContentItem` / `PlatformAdapter` /
+API schema）、改推荐流水线行为（排序 / 去重 / 交错 / 过滤开关）、改端口与构建配置、改依赖版本、
+跨边界改动（后端接口 + 前端调用同时动）、删改既有功能或涉及凭据存储、预计超过约 100 行或 3 个以上文件。
+
+文档、注释、格式这类小改动不受此限。拿不准时按重大修改处理 —— 多问一句远比返工便宜。
+
+### 任务看板（tasks/）：新 AI 先来这里领活
+
+本仓库用 `tasks/` 目录作为**跨会话共享的任务看板**（一任务一文件，协议见 `tasks/README.md`）。
+
+- **想接活**：先 `git pull`，看 `tasks/` 里「状态: open」的任务文件 → 认领（改状态为
+  `in-progress`、写认领者、**先 commit 再动手**）→ 完成验收后 `git rm` 该任务文件。
+- **想提需求**：不要自行新建任务文件——把需求告诉使用者，由任务发布者统一拆解发布；
+  或在已认领任务的「问题记录」区写下你发现的问题。
+
+完整状态机与红线见 `tasks/README.md`。本机 `AGENTS.md` 是它的上游入口，冲突时以 AGENTS.md 为准。
+
 ---
 
 ## 1. 分支模型
@@ -78,8 +100,8 @@ cd backend
 python -m venv .venv
 source .venv/Scripts/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-playwright install chromium          # 抖音浏览器检索依赖，必装
-cp .env.example .env                 # 可选，全部字段都有默认值
+playwright install chromium          # 抖音 / 小红书检索依赖，必装
+cp .env.example .env                 # 可选，全部字段都有默认值（YouTube 代理填这里）
 uvicorn main:app --reload --port 8000
 ```
 
@@ -95,6 +117,28 @@ npm run dev        # http://127.0.0.1:5173，已代理 /api 与 /videomind/api �
 
 前端是统一工程：`/` 是灵搜，`/videomind/*` 是 video-mind（源码在 `frontend/src/videomind/`），
 两个产品共用这一个 dev server，不要再单独起第二个前端。
+
+### 桌宠 pet/（可选，只在改桌宠时需要）
+
+依赖装在**仓库外**的隔离环境，避免污染仓库：
+
+```bash
+~/.workbuddy/binaries/python/versions/3.13.12/python.exe -m venv \
+  ~/.workbuddy/binaries/python/envs/pet
+~/.workbuddy/binaries/python/envs/pet/Scripts/python.exe -m pip install \
+  -i https://mirrors.aliyun.com/pypi/simple/ PyQt6 pyinstaller pillow
+```
+
+> 必须用阿里源：清华源在本机会返回「无可用版本」，pypi.org 直连很慢。
+
+```bash
+cd pet
+PET_PY="C:/Users/momo/.workbuddy/binaries/python/envs/pet/Scripts/python.exe"
+$PET_PY build-tools/build_exe.py --dir build/Jingxi --exe-name Jingxi --smoke 10 --smoke-kill
+```
+
+产物输出到 `桌面\桌宠\Jingxi\`，`pet/build/`、`dist/` 与 exe **不入库**。
+桌宠与 web 端应保持零依赖：不要为了「集成」去改 `backend/` 或 `frontend/`。
 
 ### 首次克隆后必做
 
@@ -177,7 +221,8 @@ npx prettier --write .
 npm run build         # 等价于 tsc + vite build 校验
 ```
 
-**CI 会在 PR 上自动跑这两套检查**，见 `.github/workflows/ci.yml`。
+**CI 已停用**：`.github/workflows` 与 dependabot 已由维护者移除（`cb171cf`），
+上面两套检查需**在本地手动跑完**再提 PR，并把结果贴进 PR 描述。
 
 ---
 
@@ -206,13 +251,23 @@ npm run build         # 等价于 tsc + vite build 校验
 
 ## 8. 测试与验收
 
-当前测试是手工脚本（`backend/test_douyin_browser.py`），PR 请附**可复现的自测记录**：
+**测试现状（重要，别按想象中的 CI 流程办事）：**
+
+| 范围 | 现状 | 命令 / 位置 |
+|---|---|---|
+| video-mind 后端 | ✅ pytest，100+ 用例 | `cd video-mind/backend && ./.venv/Scripts/python.exe -m pytest tests -q` |
+| 灵搜后端 | ❌ **无 pytest 用例**，只有实跑脚本 | `backend/scripts/verify_youtube_search.py`、`backend/test_douyin_browser.py`、`backend/test_xiaohongshu_browser.py` |
+| 前端（两个产品） | ✅ 构建门 + 端到端冒烟 | `npm run build`、`node frontend/scripts/e2e-smoke.mjs`（需 CDP 浏览器） |
+| 桌宠 pet/ | ✅ 打包 + 启动存活自检 | `build_exe.py --smoke 10 --smoke-kill`，`SMOKE=alive` 才算过 |
+
+灵搜侧的 PR 请附**可复现的自测记录**：
 
 - 使用的关键词（建议用《美国老爹》这类有明确归属的番剧名，能同时验证跑题过滤）
 - 连续加载 3 批以上的结果条数与耗时
 - 全局去重后的条数（用于确认没有静默丢页或重复）
 
-新增核心逻辑（打分、去重、相关性判断）时，**请补一个 pytest 用例**，哪怕只覆盖一条 happy path。
+新增核心逻辑（打分、去重、相关性判断）时，**请补一个 pytest 用例**，哪怕只覆盖一条 happy path
+——灵搜侧目前还没有 `backend/tests/` 目录，新建时放这里，并同步更新本表。
 
 ---
 
