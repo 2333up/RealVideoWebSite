@@ -20,6 +20,11 @@ AGENTS.md
 # ===== 一键启动脚本（含本机路径，仅本机可用）=====
 start.bat
 
+# ===== 本机探针/截图产物（临时调试输出，不入库）=====
+.probe/
+.chrome-probe/
+backend/frontend_state.png
+
 # ===== Python =====
 __pycache__/
 *.py[cod]
