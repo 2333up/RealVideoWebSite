@@ -186,16 +186,17 @@ def test_normalize_tree_越界时间戳被钳位():
         "children": [{"label": "子", "start": -50}],
     }
     out = mindmap_mod.normalize_tree(tree, chapters)
-    # 根有子节点 → 不持有自己的时间；越界的是子节点，它被钳进章节区间
-    assert out.get("start") is None
+    # 越界的是子节点，它被钳进章节区间；
+    # 父节点的时间由子节点算出来（不再沿用那个 99999）
     assert 0 <= out["children"][0]["start"] <= 100
+    assert out["start"] == out["children"][0]["start"]
 
 
-def test_normalize_tree_分类节点不持有自己的时间():
-    """分类节点的时间就是它第一个子节点的时间，不该再存一份。
+def test_normalize_tree_父节点范围是子节点的并集():
+    """有子节点的节点，起点=最早的子节点起点，终点=最晚的子节点终点。
 
-    存一份会在大纲里和子节点并排显示同一个时间点（看着像重复数据），
-    章节同步时还会把父子俩都生成章节，区间直接交叉。
+    这是用户定的铁律（2026-10-18）：分支的范围就是它包含内容的范围。
+    父节点不再接受手填时间，所以这里连传来的 start 都会被覆盖掉。
     """
     chapters = [{"idx": 0, "title": "A", "start": 0, "end": 100, "summary": "", "key_points": []}]
     tree = {
@@ -204,8 +205,9 @@ def test_normalize_tree_分类节点不持有自己的时间():
         "children": [{"label": "子", "start": 42}],
     }
     out = mindmap_mod.normalize_tree(tree, chapters)
-    assert out.get("start") is None
-    # 点击分类时靠 first_timed_descendant 找到跳转目标，仍然「点了有反应」
+    assert out["start"] == 42.0, "父节点起点 = 第一个子节点的起点"
+    assert out["end"] == 100.0, "父节点终点 = 子节点的终点（这里由章节补到 100）"
+    # 点击分类时仍然找得到跳转目标
     assert mindmap_mod.first_timed_descendant(out) == 42.0
 
 

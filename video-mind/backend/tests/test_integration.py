@@ -42,11 +42,11 @@ class FakeLLM(LLMProvider):
         self.calls.append({"system": system, "user": user, "purpose": purpose})
         # 顺手记一笔用量，好让「用量记账」在集成测试里也被覆盖到
         self._record_usage({"prompt_tokens": 100, "completion_tokens": 50}, purpose=purpose)
-        # 通过 system 提示词区分是分章节还是导图
-        if "章节" in system and self._chapters is not None:
+        # 按 purpose 分流：两个提示词里都出现「章节」二字，靠关键词判别会串台
+        if purpose == "思维导图":
+            return self._mindmap if self._mindmap is not None else "{}"
+        if self._chapters is not None:
             return self._chapters
-        if self._mindmap is not None:
-            return self._mindmap
         return "{}"
 
 
@@ -73,7 +73,8 @@ def patch_llm(monkeypatch):
         return holder["instance"]
 
     monkeypatch.setattr(chapter_mod, "get_llm", factory)
-    # 导图不再调用大模型（一章一节点的确定性构造），无需 mock
+    # 导图同样要 mock：它现在会再调一次模型做多层重组
+    monkeypatch.setattr(mindmap_mod, "get_llm", factory)
     return holder
 
 
@@ -163,26 +164,72 @@ def test_导图_时间戳全部落在视频时长内(segments, patch_llm):
             assert 0 <= s <= 360, f"导图时间戳 {s} 超出视频时长范围"
 
 
-def test_导图_节点与章节一一对应(segments, patch_llm):
-    """分析完成后，导图节点和章节必须一一对应——这是一一对应需求的根基。
+def test_导图_保留模型给出的多层嵌套(segments, patch_llm):
+    """模型重组出的多层结构必须原样保留，不能被压平成两层。
 
-    以前这一步会再调一次 LLM 把章节重组成多层分类，节点和章节对不上号；
-    现在是确定性构造：根节点 = 视频标题，每个章节挂一个叶子。
+    导图体现的是知识结构：一支课被压成「根 + N 个章节名」之后，
+    「谁是谁的子话题」就彻底看不出来了。所以这里断言深度与层级都在。
     """
     chapters = [
         {"idx": 0, "title": "开场", "start": 0, "end": 60, "summary": "s", "key_points": []},
         {"idx": 1, "title": "主体", "start": 60, "end": 120, "summary": "s", "key_points": []},
         {"idx": 2, "title": "收尾", "start": 120, "end": 180, "summary": "s", "key_points": []},
     ]
+    payload = """
+    {"label": "测试视频", "start": null, "end": null, "summary": "", "children": [
+      {"label": "基础概念", "start": 0, "end": 60, "summary": "先讲两个基础概念。", "children": [
+        {"label": "概念一", "start": 0, "end": 30, "summary": "概念一的定义与用途。", "children": [
+          {"label": "常见误区", "start": 10, "end": 25, "summary": "容易被搞混的两种写法。"}
+        ]},
+        {"label": "概念二", "start": 30, "end": 60, "summary": "概念二的适用边界。"}
+      ]},
+      {"label": "进阶用法", "start": 60, "end": 180, "summary": "两个实战场景。", "children": [
+        {"label": "场景A", "start": 60, "end": 120, "summary": "场景A的完整步骤。"},
+        {"label": "场景B", "start": 120, "end": 180, "summary": "场景B的取舍。"}
+      ]}
+    ]}
+    """
+    patch_llm["instance"] = FakeLLM(mindmap_payload=payload)
+    tree = mindmap_mod.build_mindmap(chapters, video_title="测试视频")
+
+    assert tree["label"] == "测试视频"
+    # 深度 3（根 → 基础概念 → 概念一 → 常见误区）必须活着
+    deep = tree["children"][0]["children"][0]["children"][0]
+    assert deep["label"] == "常见误区", "四层节点被压掉了"
+    assert deep["summary"] == "容易被搞混的两种写法。", "摘要必须跟着节点一起保留"
+    # 有子节点的节点：范围由子节点算出来（起点=最早子节点起点，终点=最晚子节点终点）
+    # 「概念一」自己写着 0-30，但它只有一个 10-25 的子节点 —— 所以它就是 10-25，
+    # 一路顶上去根节点落在 10-180
+    assert tree["start"] == 10, "根节点起点 = 最早子节点的起点"
+    assert tree["end"] == 180, "根节点终点 = 最晚子节点的终点"
+    assert tree["children"][0]["start"] == 10 and tree["children"][0]["end"] == 60
+    concept1 = tree["children"][0]["children"][0]
+    assert concept1["start"] == 10 and concept1["end"] == 25, "父节点不能比子节点覆盖得还宽"
+    # 叶子拿到合法的时间范围，且 end 缺省时由所属章节补齐
+    leaf = tree["children"][1]["children"][0]
+    assert leaf["start"] == 60 and leaf["end"] == 120
+
+
+def test_导图_模型不可用时退回一章一叶子(patch_llm):
+    """模型这一步挂了不能把整支视频打成 failed：转写和分章节已经跑完了。
+
+    兜底就是「一章一叶子」，标题与时间范围原样搬，摘要取章节摘要。
+    """
+    chapters = [
+        {"idx": 0, "title": "开场", "start": 0, "end": 60, "summary": "开场摘要", "key_points": []},
+        {"idx": 1, "title": "主体", "start": 60, "end": 120, "summary": "主体摘要", "key_points": []},
+        {"idx": 2, "title": "收尾", "start": 120, "end": 180, "summary": "收尾摘要", "key_points": []},
+    ]
+    # 没配 mindmap_payload：假模型对「思维导图」返回 "{}"，走兜底分支
     tree = mindmap_mod.build_mindmap(chapters, video_title="测试视频")
 
     assert tree["label"] == "测试视频"
     kids = tree.get("children") or []
-    assert len(kids) == len(chapters), f"节点数 {len(kids)} != 章节数 {len(chapters)}"
+    assert len(kids) == len(chapters), f"兜底后节点数 {len(kids)} != 章节数 {len(chapters)}"
     for node, c in zip(kids, chapters):
-        assert node["label"] == c["title"], "节点标题必须与章节标题一致"
-        assert node["start"] == c["start"], "节点时间必须与章节起点一致"
-        assert not node.get("children"), "章节节点不该有下级，否则就不是一一对应"
+        assert node["label"] == c["title"], "兜底节点的标题必须沿用章节标题"
+        assert node["start"] == c["start"], "兜底节点的起点必须沿用章节起点"
+        assert node["summary"] == c["summary"], "兜底节点要带上章节摘要"
 
 
 def test_导图_空章节报错(patch_llm):
