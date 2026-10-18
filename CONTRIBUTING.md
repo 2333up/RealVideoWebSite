@@ -107,6 +107,28 @@ npm run dev        # http://127.0.0.1:5173，已代理 /api 与 /videomind/api �
 前端是统一工程：`/` 是灵搜，`/videomind/*` 是 video-mind（源码在 `frontend/src/videomind/`），
 两个产品共用这一个 dev server，不要再单独起第二个前端。
 
+### 桌宠 pet/（可选，只在改桌宠时需要）
+
+依赖装在**仓库外**的隔离环境，避免污染仓库：
+
+```bash
+~/.workbuddy/binaries/python/versions/3.13.12/python.exe -m venv \
+  ~/.workbuddy/binaries/python/envs/pet
+~/.workbuddy/binaries/python/envs/pet/Scripts/python.exe -m pip install \
+  -i https://mirrors.aliyun.com/pypi/simple/ PyQt6 pyinstaller pillow
+```
+
+> 必须用阿里源：清华源在本机会返回「无可用版本」，pypi.org 直连很慢。
+
+```bash
+cd pet
+PET_PY="C:/Users/momo/.workbuddy/binaries/python/envs/pet/Scripts/python.exe"
+$PET_PY build-tools/build_exe.py --dir build/Jingxi --exe-name Jingxi --smoke 10 --smoke-kill
+```
+
+产物输出到 `桌面\桌宠\Jingxi\`，`pet/build/`、`dist/` 与 exe **不入库**。
+桌宠与 web 端应保持零依赖：不要为了「集成」去改 `backend/` 或 `frontend/`。
+
 ### 首次克隆后必做
 
 ```bash
@@ -225,6 +247,7 @@ npm run build         # 等价于 tsc + vite build 校验
 | video-mind 后端 | ✅ pytest，100+ 用例 | `cd video-mind/backend && ./.venv/Scripts/python.exe -m pytest tests -q` |
 | 灵搜后端 | ❌ **无 pytest 用例**，只有实跑脚本 | `backend/scripts/verify_youtube_search.py`、`backend/test_douyin_browser.py`、`backend/test_xiaohongshu_browser.py` |
 | 前端（两个产品） | ✅ 构建门 + 端到端冒烟 | `npm run build`、`node frontend/scripts/e2e-smoke.mjs`（需 CDP 浏览器） |
+| 桌宠 pet/ | ✅ 打包 + 启动存活自检 | `build_exe.py --smoke 10 --smoke-kill`，`SMOKE=alive` 才算过 |
 
 灵搜侧的 PR 请附**可复现的自测记录**：
 
